@@ -13,8 +13,8 @@ before_install:
   - sudo add-apt-repository ppa:ubuntu-toolchain-r/test
   - sudo apt-get update
   # using gcc 5
-  - sudo apt-get install gcc-5 g++-5
-  - sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-5 1
+  - sudo apt-get install gcc-5 g++-5 -y
+  - sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-5 1 -y
   - sudo apt-get install build-essential -y
   - sudo apt-get install gfortran -y
 
