@@ -5,6 +5,5 @@ dependencies:
   - python=3.6
   - pytest
   - numpy
-  - libgcc
-  - libgfortran
+  - gcc_linux-64
   - gfortran_linux-64
