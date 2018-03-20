@@ -19,6 +19,7 @@ before_install:
   - hash -r
   - conda config --set always_yes yes --set changeps1 no --set show_channel_urls true
   - conda update -q conda
+  - conda update -n root python
   - conda info -a
 
 install:
