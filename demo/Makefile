@@ -1,4 +1,4 @@
-DIRS = structure excitation pirr aidr ionization polariz
+DIRS = structure excitation pirr aidr ionization polariz Li_crm
 # Note: FeL needs a lot of calculation time, so we skip this for the daily
 # testing.
 
