@@ -1,2 +1,5 @@
-all: fe24_pirr.py
-	python fe24_pirr.py
+RESULTS = li.lev li.rr
+SCRIPTS = fe24_pirr.py
+
+
+include ../Make.common

@@ -6,7 +6,7 @@
 *.dvi
 
 # Ignore generated Makefiles
-Makefile
+/Makefile
 blas/Makefile
 coul/Makefile
 faclib/Makefile
@@ -14,10 +14,13 @@ ionis/Makefile
 lapack/Makefile
 minpack/Makefile
 mpfun/Makefile
+modqed/Makefile
 toms/Makefile
 ode/Makefile
 quadpack/Makefile
 sfac/Makefile
+tests/Makefile
+python/Makefile
 
 # Ignore binaries
 sfac/scrm
@@ -33,4 +36,39 @@ autom4te.cache/
 
 # Python build dirs
 build/
+dist/
+__pycache__
+.pytest_cache
+*.pyc
 
+# Python version file (automatically generated)
+python/version.py
+
+# demos
+demo/*/*.b
+demo/*/*.ai
+demo/*/*.ce
+demo/*/*.ceM
+demo/*/*.ci
+demo/*/*.en
+demo/*/*.rr
+demo/*/*.lev
+demo/*/*.pot
+demo/*/*.tr
+demo/*/*.txt
+demo/*/*.sp
+demo/*/*.rt
+
+# latex binaries in docs
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.idx
+*.ilg
+*.ind
+*.out
+*.toc
+
+# manual (it should be pushed in release-pdf branch by circle-ci)
+doc/manual.pdf

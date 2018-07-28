@@ -21,48 +21,74 @@
 
 #include "global.h"
 #include "nucleus.h"
-#include "coulomb.h"
 #include "config.h"
 #include "interpolation.h"
 
 typedef struct _POTENTIAL_ {
+  int nfrozen;
+  int npseudo;
+  int mpseudo;
+  int dpseudo;
   int mode;
   int flag;
   int r_core;
   int maxrp;
   int nmax;
-  double hxs, ratio, asymp, rmin;
+  int nse, mse, pse, mvp, pvp, hpvs, hlike;
+  double hx0, hx1, chx;
+  double hxs, ahx, ihx, rhx, dhx, ratio, asymp, rmin;
   double Z[MAXRP]; /*effective atomic number*/
+  double dZ[MAXRP], dZ2[MAXRP];
   double N; /*number of electrons*/
-  double lambda, a; /* parameter for the Vc */
-  double ar, br; /* parameter for the transformation */
+  double lambda; /* parameter for the Vc */
+  double a; /* previously used to parameterize the Vc, but now always 0.0*/
+  double ar, br, qr; /* parameter for the transformation */
   int ib, nb, ib1;
   double bqp, rb; /* boundary condition */
   double rad[MAXRP];
+  double mqrho[MAXRP];
   double dr_drho[MAXRP];
   double dr_drho2[MAXRP];
+  double vtr[MAXRP];
   double Vc[MAXRP];
   double dVc[MAXRP];
   double dVc2[MAXRP];
+  double qdist[MAXRP];
   double U[MAXRP];
   double dU[MAXRP];
   double dU2[MAXRP];
   double W[MAXRP];
   double dW[MAXRP];
   double dW2[MAXRP];
-  double uehling[MAXRP];
+  double ZVP[MAXRP];
+  double dZVP[MAXRP];
+  double dZVP2[MAXRP];
+  double rfn[NKSEP];
+  int nfn[NKSEP];
+  double ZSE[NKSEP][MAXRP];
+  double dZSE[NKSEP][MAXRP];
+  double dZSE2[NKSEP][MAXRP];
+  double VT[NKSEP+1][MAXRP];
+  double dVT[NKSEP+1][MAXRP];
+  double dVT2[NKSEP+1][MAXRP];
+  NUCLEUS *atom;
 } POTENTIAL;
 
 typedef struct _ORBITAL_ {
   int n;
-  int kappa;
-  double energy;
+  int kappa, kv;
+  double energy, se, ose, qed;
   double qr_norm;
   double *phase;
   double *wfun;
-  int ilast;
+  double bqp0, bqp1, pdx;
+  int ilast, idx, isol;
+  double rfn;
+  struct _ORBITAL_ *horb;
+  struct _ORBITAL_ *rorb;
 } ORBITAL;
 
+void InitOrbitalData(void *p, int n);
 double *GetVEffective(void);
 double RadialDiracCoulomb(int npts, double *p, double *q, double *r,
 			  double z, int n, int kappa);
@@ -75,15 +101,22 @@ int RadialFreeInner(ORBITAL *orb, POTENTIAL *pot);
 int RadialFree(ORBITAL *orb, POTENTIAL *pot);
 double InnerProduct(int i1, int n, 
 		    double *p1, double *p2, POTENTIAL *pot);
-void Differential(double *p, double *dp, int i1, int i2);
+void Differential(double *p, double *dp, int i1, int i2, double *drdrho);
+void DrLargeSmall(ORBITAL *orb, POTENTIAL *pot, double *pr, double *qr);
 int SetOrbitalRGrid(POTENTIAL *pot);
-double GetRFromRho(double rho, double a, double b, double r0);
-int SetPotentialZ(POTENTIAL *pot, double c);
-int SetPotentialUehling(POTENTIAL *pot, int vp);
+double GetRFromRho(double rho, double a, double b, double q, double r0);
+int SetPotentialExtraZ(POTENTIAL *pot, int iep);
+int SetPotentialZ(POTENTIAL *pot);
+int SetPotentialVP(POTENTIAL *pot);
+int SetPotentialSE(POTENTIAL *pot);
 int SetPotentialVc(POTENTIAL *pot);
+int SetPotentialVT(POTENTIAL *pot);
 int SetPotentialU(POTENTIAL *pot, int n, double *u);
-int SetPotentialW (POTENTIAL *pot, double e, int kappa);
-
+int SetPotentialW (POTENTIAL *pot, double e, int kappa, int kv);
+int IdxVT(int kappa);
+int DiracSmall(ORBITAL *orb, POTENTIAL *pot, int i2, int kv);
+double EneTol(double e);
+  
 #endif
 
 

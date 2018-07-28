@@ -159,8 +159,12 @@ typedef struct _CONFIG_ {
   int n_shells;
   int n_csfs;
   int nnrs;
+  int igroup;
+  int icfg;
+  double sweight;
   double energy;
   double delta;
+  double sth;
   int *nrs;
   int *symstate;
   SHELL *shells;
@@ -209,7 +213,9 @@ typedef struct _AVERAGE_CONFIG_ {
 typedef struct _CONFIG_GROUP_ { 
   int n_cfgs;
   int n_electrons;
+  int nmax;
   ARRAY cfg_list;
+  double sweight;
   char name[GROUP_NAME_LEN]; 
 } CONFIG_GROUP;
 
@@ -249,6 +255,7 @@ typedef struct _SYMMETRY_ {
   ARRAY states;
 } SYMMETRY;
 
+int ShellDegeneracy(int g, int nq);
 int          ShellsFromString(char *scfg, double *dnq, SHELL **shell);
 int          ShellsFromStringNR(char *scfg, double *dnq, SHELL **shell);
 int          GetRestriction(char *scfg, SHELL_RESTRICTION **sr, int m);
@@ -285,7 +292,8 @@ int          ShellToInt(int n, int k);
 int          ShellIndex(int n, int kappa, int ns, SHELL *s);
 void         IntToShell(int i, int *n, int *k);
 void         PackShellState(SHELL_STATE *s, int J, int j, int nu, int Nr);
-int          GetAverageConfig(int ng, int *kg, double *weight,
+int ShellNeedNuNr(SHELL *s, SHELL_STATE *st);
+int          GetAverageConfig(int ng, int *kg, int ic, double *weight,
 			      int n_screen, int *screened_n, 
 			      double screened_charge,
 			      int screened_kl, AVERAGE_CONFIG *acfg);
@@ -309,12 +317,17 @@ void         DecodePJ(int i, int *p, int *j);
 int          SpecSymbol(char *s, int kl);
 int          ConstructConfigName(char *s, int n, CONFIG *c);
 void         ListConfig(char *fn, int n, int *kg);
-int          IBisect(int k, int n, int *a);
-int          Bisect(void *p0, int n, int m, void *p,
-		    int (*comp)(const void *, const void *));
+int ReadConfig(char *fn, char *c);
 int          InGroups(int kg, int ng, int *kgroup);
 int          InitConfig(void);
 int          ReinitConfig(int m);
 int          SetNCG(void);
+int ConfigToIList(CONFIG *c, int n, int *s);
+CONFIG *ConfigFromIList(int n, int *s);
+int ConfigExists(CONFIG *c);
+void SetClosedShellNR(int n, int k);
+int IsClosedShellNR(int n, int k, int nq);
+int IsClosedShellFR(int n, int k, int j, int nq);
+int IsClosedComplex(int n, int nq);
 
 #endif

@@ -30,10 +30,13 @@
 #include <time.h>
 
 typedef struct _HAMILTON_ {
-  int pj;
+  int pj, iham;
   int dim;
+  int ndim;
   int n_basis;
   int hsize;
+  int dsize;
+  int dsize2;
   int msize;
   int dim0;
   int n_basis0;
@@ -47,18 +50,24 @@ typedef struct _HAMILTON_ {
   double *work;
   int *iwork;
   double *heff;
+  int odim;
+  int ondim;
+  int onbs;
+  int ohsize;
+  double *oham;
+  int *obs;
+  double *mmix;
+  int orig_dim;
+  int exp_dim;
+  int diag_iter;
+  int perturb_iter;
+  double diag_etol;
+  double diag_emin;
 } HAMILTON;
-
-typedef struct _SHAMILTON_ {
-  int pj;
-  int nbasis, nlevs;
-  STATE **basis;
-  unsigned char closed[MBCLOSE];
-} SHAMILTON;
 
 typedef struct _LEVEL_ {
   int pj;
-  int iham, ilev;
+  int iham, ilev, slev;
   int n_basis;
   int pb;
   int kpb[NPRINCIPLE];
@@ -69,12 +78,21 @@ typedef struct _LEVEL_ {
   double energy;
 } LEVEL;
 
+typedef struct _SHAMILTON_ {
+  int pj;
+  int nbasis, nlevs;
+  STATE **basis;
+  LEVEL **levs;
+  unsigned char closed[MBCLOSE];
+} SHAMILTON;
+
 typedef struct _LEVEL_ION_ {
   int imin;
   int imax;
 } LEVEL_ION;
 
 typedef struct _ANGZ_DATUM_ {
+  LOCK lock;
   int ns;
   int *nz;
   void **angz;
@@ -146,6 +164,8 @@ int CompareInt(const void *a1, const void *a2);
 int ConstructHamilton(int isym, int k0, int k, int *kg, int kp, int *kgp, int md);
 int ConstructHamiltonDiagonal(int isym, int k, int *kg, int m);
 int ValidBasis(STATE *s, int k, int *kg, int n);
+int SolveStructure(char *fn, char *hfn,
+		   int ng, int *kg, int npg, int *kgp, int ip);
 int ConstructHamiltonFrozen(int isym, int k, int *kg, int n, int nc, int *kc);
 void HamiltonElement1E2E(int isym, int isi, int isj, double *r1, double *r2);
 double HamiltonElement(int isym, int isi, int isj);
@@ -159,10 +179,11 @@ double Hamilton2E(int n_shells, SHELL_STATE *sbra,
 		  SHELL_STATE *sket,INTERACT_SHELL *s);
 double Hamilton1E(int n_shells, SHELL_STATE *sbra, 
 		  SHELL_STATE *sket,INTERACT_SHELL *s);
-HAMILTON *GetHamilton(void);
+HAMILTON *GetHamilton(int isym);
 SHAMILTON *GetSHamilton(int *n);
-int DiagnolizeHamilton(void);
-int AddToLevels(int ng, int *kg);
+int NHams(void);
+int DiagnolizeHamilton(HAMILTON *h);
+int AddToLevels(HAMILTON *h, int ng, int *kg);
 int AddECorrection(int kref, int k, double e, int nmin);
 LEVEL *GetLevel(int k);
 LEVEL *GetEBLevel(int k);
@@ -177,6 +198,7 @@ int SortLevels(int start, int n, int m);
 int GetBaseJ(STATE *s);
 void AngularFrozen(int nts, int *ts, int ncs, int *cs);
 void ClearAngularFrozen(void);
+void PrepAngZStates(int n0, int *s0, int n1, int *s1);
 int PrepAngular(int n1, int *is1, int n2, int *is2);
 int AngularZMix(ANGULAR_ZMIX **ang, int lower, int upper, int mink, int maxk,
 		int *nmk, double **mbk);
@@ -202,7 +224,7 @@ int AddToAngularZMix(int *n, int *nz, ANGULAR_ZMIX **ang,
 int AddToAngularZFB(int *n, int *nz, ANGULAR_ZFB **ang,
 		    int kb, double coeff);
 int AngularZxZFreeBound(ANGULAR_ZxZMIX **ang, int lower, int upper);
-int GetBasisTable(char *fn, int m);
+int GetBasisTable(char *fn, int m, int k);
 int ConstructLevelName(char *name, char *sname, char *nc, 
 		       int *vnl, STATE *basis);
 int SaveLevels(char *fn, int m, int n);
@@ -218,28 +240,33 @@ int ClearLevelTable(void);
 int InitStructure(void);
 int ReinitStructure(int m);
 int TestHamilton(void);
-int ShellDegeneracy(int g, int nq);
 void SetSymmetry(int p, int n, int *j);
+void SetPerturbThreshold(int m, double t, double b, double c);
+void SetDiagMaxIter(int maxiter, double maxtol);
 int *GetSymmetrySet(int *p, int *nj);
 int ZerothEnergyConfigSym(int n, int *s0, double **e);
 void CutMixing(int nlev, int *ilev, int n, int *kg, double c);
 void FlagClosed(SHAMILTON *h);
 int IsClosedShell(int ih, int p);
-int AllocHamMem(int hdim, int nbasis);
+int AllocHamMem(HAMILTON *h, int hdim, int nbasis);
 void SetFields(double b, double e, double a, int m);
 void GetFields(double *b, double *e, double *a);
-int CodeBasisEB(int s, int m);
-void DecodeBasisEB(int k, int *s, int *m);
 int ConstructHamiltonEB(int n, int *ilev);
 void StructureEB(char *fn, int n, int *ilev);
 double HamiltonElementEB(int i, int j);
-
 int SlaterCoeff(char *fn, int nlevs, int *ilevs, int na, SHELL *sa, 
 		int nb, SHELL *sb);
 void AddSlaterCoeff(double *c, double a, int n_shells, 
 		    SHELL_STATE *sbra, SHELL_STATE *sket, 
 		    INTERACT_SHELL *s, int na, SHELL *sa, 
 		    int nb, SHELL *sb);
+int WriteHamilton(char *fn, int ng0, int ng, int *kg, int ngp, int *kgp);
+int ReadHamilton(char *fn, int *ng0, int *ng, int **kg,
+		 int *ngp, int **kgp, int md);
+void GenEigen(char *trans, char *jobz, int n, double *ap,
+	      double *w, double *wi, double *z,
+	      double *work, int lwork, int *info);
+void GetInteractConfigs(int ng, int *kg, int ngp, int *kgp, double sth);
 
 #endif
 

@@ -78,6 +78,63 @@ double ai_cut = AICUT;
 static REC_COMPLEX rec_complex[MAX_COMPLEX];
 int n_complex = 0;
 
+static int maxaicache = MAXAICACHE;
+static AICACHE aicache = {0, 0};
+
+void SetMaxAICache(int n) {
+  if (n > 0) {
+    maxaicache = n;
+  } else {
+    maxaicache = MAXAICACHE;
+  }
+  FreeAICache(0);
+}
+
+void AllocAICache(void) {
+  aicache.low = malloc(sizeof(int)*maxaicache);
+  aicache.up = malloc(sizeof(int)*maxaicache);
+  aicache.e = malloc(sizeof(double)*maxaicache);
+  aicache.nz = malloc(sizeof(int)*maxaicache);
+  aicache.nzf = malloc(sizeof(int)*maxaicache);
+  aicache.az = malloc(sizeof(ANGULAR_ZxZMIX *)*maxaicache);
+  aicache.azf = malloc(sizeof(ANGULAR_ZFB *)*maxaicache);
+  int i;
+  for (i = 0; i < maxaicache; i++) {
+    aicache.low[i] = -1;
+    aicache.up[i] = -1;
+    aicache.e[i] = 0;
+    aicache.nz[i] = 0;
+    aicache.nzf[i] = 0;
+    aicache.az[i] = NULL;
+    aicache.azf[i] = NULL;
+  }
+}
+
+void FreeAICache(int m) {
+  int i;
+  for (i = 0; i < aicache.nc; i++) {
+    if (aicache.nz[i] > 0) {
+      free(aicache.az[i]);
+      aicache.az[i] = NULL;
+      aicache.nz[i] = 0;
+    }
+    if (aicache.nzf[i] > 0) {
+      free(aicache.azf[i]);
+      aicache.azf[i] = NULL;
+      aicache.nzf[i] = 0;
+    }
+  }
+  if (m == 0) {
+    free(aicache.low);
+    free(aicache.up);
+    free(aicache.e);
+    free(aicache.nz);
+    free(aicache.nzf);
+    free(aicache.az);
+    free(aicache.azf);
+  }
+}
+
 static void FreeRecPkData(void *p) {
   double *dp;
   dp = *((double **) p);
@@ -295,11 +352,12 @@ int RecStates(int n, int k, int *kg, char *fn) {
   rec_complex[n_complex].n = n;
   rec_complex[n_complex].s0 = nlevels;
   for (i = 0; i < nsym; i++) {
+    HAMILTON *h = GetHamilton(i);
     m = ConstructHamilton(i, k, k, kg, 0, NULL, 111);
     if (m < 0) continue;
-    j = DiagnolizeHamilton();
+    j = DiagnolizeHamilton(h);
     if (j < 0) return -1;
-    AddToLevels(0, NULL);
+    AddToLevels(h, 0, NULL);
   }
   rec_complex[n_complex].s1 = GetNumLevels()-1;
   n_complex++;
@@ -363,6 +421,7 @@ int RecStatesFrozen(int n, int k, int *kg, char *fn) {
   rec_complex[n_complex].n = n;
   rec_complex[n_complex].s0 = nlevels;
   for (i = 0; i < nsym; i++) {
+    HAMILTON *h = GetHamilton(i);
     if (n >= pw_scratch.n_frozen) {
       i0 = 0;
       for (t = 0; t < nt; t++) {
@@ -375,16 +434,16 @@ int RecStatesFrozen(int n, int k, int *kg, char *fn) {
 	  if (!InGroups(s->kgroup, k, kg)) continue;
 	  m = ConstructHamiltonFrozen(i, j, NULL, n, 0, NULL);
 	  if (m < 0) continue;
-	  if (DiagnolizeHamilton() < 0) return -2;
-	  AddToLevels(0, NULL);
+	  if (DiagnolizeHamilton(h) < 0) return -2;
+	  AddToLevels(h, 0, NULL);
 	}
 	i0 = rec_complex[t].s1+1;
       }
     } else {
       m = ConstructHamiltonFrozen(i, k, kg, n, 0, NULL);
       if (m < 0) continue;
-      if (DiagnolizeHamilton() < 0) return -2;
-      AddToLevels(0, NULL);
+      if (DiagnolizeHamilton(h) < 0) return -2;
+      AddToLevels(h, 0, NULL);
     }
   }
   rec_complex[n_complex].s1 = GetNumLevels()-1;
@@ -413,7 +472,8 @@ void RRRadialQkHydrogenicParams(int np, double *p,
   double fvec[NNE], fjac[NNE*NPARAMS];
   double tol;
   int i, j, k, ne;
-
+#pragma omp critical
+  {
   qk = (double **) ArraySet(hyd_qk_array, n, NULL, InitPointerData);
   if (*qk == NULL) {
     tol = 1E-4;
@@ -463,6 +523,7 @@ void RRRadialQkHydrogenicParams(int np, double *p,
   p[0] = t[0]/(z0*z0);
   for (i = 1; i < np; i++) {
     p[i] = t[i];
+  }
   }
 #undef NNE
 }  
@@ -573,21 +634,28 @@ int RRRadialMultipoleTable(double *qr, int k0, int k1, int m) {
   }
 
   nqk = n_tegrid*n_egrid;
-  p = (double **) MultiSet(qk_array, index, NULL, 
+  LOCK *lock = NULL;
+  int locked = 0;
+  p = (double **) MultiSet(qk_array, index, NULL, &lock,
 			   InitPointerData, FreeRecPkData);
+  if (lock && !(*p)) {
+    SetLock(lock);
+    locked = 1;
+  }
   if (*p) {
     for (i = 0; i < nqk; i++) {
       qr[i] = (*p)[i];
     }
+    if (locked) ReleaseLock(lock);
     return 0;
   }
-  
+
   gauge = GetTransitionGauge();
   mode = GetTransitionMode();
 
-  *p = (double *) malloc(sizeof(double)*nqk);
+  double *pd = (double *) malloc(sizeof(double)*nqk);
   
-  qk = *p;
+  qk = pd;
   /* the factor 2 comes from the conitinuum norm */
   pref = sqrt(2.0);  
   for (ite = 0; ite < n_tegrid; ite++) {
@@ -606,8 +674,11 @@ int RRRadialMultipoleTable(double *qr, int k0, int k1, int m) {
   }
   
   for (i = 0; i < nqk; i++) {
-    qr[i] = (*p)[i];
+    qr[i] = pd[i];
   }
+  *p = pd;
+  if (locked) ReleaseLock(lock);
+#pragma omp flush
   return 0;
 }
     
@@ -639,7 +710,7 @@ int RRRadialQkTable(double *qr, int k0, int k1, int m) {
   GetHydrogenicNL(&nh, &klh, NULL, NULL);
   if (m == -1) {
     r0 = GetResidualZ();
-    RRRadialQkHydrogenicParams(NPARAMS, hparams, r0, orb->n, klb0);
+    RRRadialQkHydrogenicParams(NPARAMS, hparams, r0, orb->n, klb0);    
     RRRadialQkFromFit(NPARAMS, hparams, n_egrid, 
 		      xegrid, log_xegrid, tq0, NULL, 0, &klb0);
     if (klb0 > klh || orb->n > nh) {
@@ -666,13 +737,21 @@ int RRRadialQkTable(double *qr, int k0, int k1, int m) {
   } else {
     index[2] = k-1;
   }
-
+  LOCK *lock = NULL;
+  int locked = 0;
   nqk = n_tegrid*n_egrid;
-  p = (double **) MultiSet(qk_array, index, NULL, 
+  p = (double **) MultiSet(qk_array, index, NULL, &lock,
 			   InitPointerData, FreeRecPkData);
+  if (lock && !(*p)) {
+    SetLock(lock);
+    locked = 1;
+  }
   if (*p) {
     for (i = 0; i < nqk; i++) {
       qr[i] = (*p)[i];
+    }
+    if (locked) {      
+      ReleaseLock(lock);
     }
     return 0;
   }
@@ -680,9 +759,9 @@ int RRRadialQkTable(double *qr, int k0, int k1, int m) {
   gauge = GetTransitionGauge();
   mode = GetTransitionMode();
 
-  *p = (double *) malloc(sizeof(double)*nqk);
+  double *pd = (double *) malloc(sizeof(double)*nqk);
   
-  qk = *p;
+  qk = pd;
   /* the factor 2 comes from the conitinuum norm */
   pref = 2.0/((k+1.0)*(jb0+1.0));
   
@@ -732,8 +811,11 @@ int RRRadialQkTable(double *qr, int k0, int k1, int m) {
   }
   
   for (i = 0; i < nqk; i++) {
-    qr[i] = (*p)[i];
+    qr[i] = pd[i];
   }
+  *p = pd;
+  if (locked) ReleaseLock(lock);
+#pragma omp flush
   return 0;
 }
   
@@ -1006,7 +1088,6 @@ int BoundFreeOS(double *rqu, double *rqc, double *eb,
 
   *eb = (lev2->energy - lev1->energy);
   if (*eb <= 0.0) return -1;
-
   nz = AngularZFreeBound(&ang, f, rec);
   if (nz <= 0) return -1;
 
@@ -1158,7 +1239,7 @@ int AutoionizeRateUTA(double *rate, double *e, int rec, int f) {
 	kappaf = GetKappaFromJL(jf, klf);
 	for (k = kmin; k <= kmax; k += 2) {
 	  if (!Triangle(j0, j1, k) || !Triangle(jb, jf, k)) continue;
-	  AIRadialPk(&ai_pk, k0, k1, kb, kappaf, k);
+	  AIRadialPk(&ai_pk, k0, k1, kb, kappaf, k, 0);
 	  if (n_egrid > 1) {
 	    UVIP3P(np, n_egrid, log_egrid, ai_pk, nt, &log_e, &s);
 	  } else {
@@ -1189,7 +1270,7 @@ int AutoionizeRateUTA(double *rate, double *e, int rec, int f) {
 	    if (!Triangle(jb, jf, k)) continue;
 	    b = W6j(j, jf, j0, k, j1, j1);
 	    if (fabs(b) < EPS30) continue;
-	    AIRadialPk(&ai_pk, k0, k1, kb, kappaf, k);
+	    AIRadialPk(&ai_pk, k0, k1, kb, kappaf, k, 0);
 	    if (n_egrid > 1) {
 	      UVIP3P(np, n_egrid, log_egrid, ai_pk, nt, &log_e, &s);
 	    } else {
@@ -1223,6 +1304,13 @@ int AutoionizeRate(double *rate, double *e, int rec, int f, int msub) {
   int np, nt, m1, m2, m;
   int kappafp, jfp, klfp, dkl;
 
+  /*
+  nz = aicache.nz[ic];
+  nzfb = aicache.nzf[ic];
+  ang = aicache.az[ic];
+  zfb = aicache.azf[ic];
+  if (nz <= 0 && nzfb <= 0) return -1;
+  */
   *rate = 0.0;
   lev1 = GetLevel(rec);
   lev2 = GetLevel(f);
@@ -1253,38 +1341,70 @@ int AutoionizeRate(double *rate, double *e, int rec, int f, int msub) {
   nkappaf = njf*2;
   p = malloc(sizeof(double)*nkappaf);
   for (ip = 0; ip < nkappaf; ip++) p[ip] = 0.0;
-
   nz = AngularZxZFreeBound(&ang, f, rec);
   np = 3;
   nt = 1;
   if (nz > 0) {
+    //int iter = 0;
+    short *ia;
+    ia = malloc(sizeof(short)*nz);
     for (i = 0; i < nz; i++) {
-      jf = ang[i].k0;
-      kb = ang[i].k1;
-      k0 = ang[i].k2;
-      k1 = ang[i].k3;
-      kappafp = GetOrbital(kb)->kappa;
-      klfp = GetLFromKappa(kappafp);
-      kappafp = GetOrbital(k0)->kappa;
-      klfp += GetLFromKappa(kappafp);
-      kappafp = GetOrbital(k1)->kappa;
-      klfp += GetLFromKappa(kappafp);      
-      ij = (jf - jmin);
-      for (ik = -1; ik <= 1; ik += 2) {
-	klf = jf + ik;  	
-	if (IsOdd((klfp+klf)/2)) continue;
-	kappaf = GetKappaFromJL(jf, klf);
-	AIRadialPk(&ai_pk, k0, k1, kb, kappaf, ang[i].k);
-	if (n_egrid > 1) {
-	  UVIP3P(np, n_egrid, log_egrid, ai_pk, nt, &log_e, &s);
-	} else {
-	  s = ai_pk[0];
+      ia[i] = 0;
+    }
+    while (1) {
+      //iter++;
+      int nleft = 0;      
+      for (i = 0; i < nz; i++) {
+	if (ia[i] == 3) continue;
+	jf = ang[i].k0;
+	kb = ang[i].k1;
+	k0 = ang[i].k2;
+	k1 = ang[i].k3;
+	kappafp = GetOrbital(kb)->kappa;
+	klfp = GetLFromKappa(kappafp);
+	kappafp = GetOrbital(k0)->kappa;
+	klfp += GetLFromKappa(kappafp);
+	kappafp = GetOrbital(k1)->kappa;
+	klfp += GetLFromKappa(kappafp);      
+	ij = (jf - jmin);
+	for (ik = -1; ik <= 1; ik += 2) {
+	  if (ik == -1) {
+	    if (ia[i] == 1) continue;
+	  } else {
+	    if (ia[i] == 2) continue;
+	  }
+	  klf = jf + ik;  	
+	  if (IsOdd((klfp+klf)/2)) {
+	    if (ik == -1) ia[i] |= 1;
+	    else ia[i] |= 2;
+	    continue;
+	  }
+	  kappaf = GetKappaFromJL(jf, klf);
+	  int type = AIRadialPk(&ai_pk, k0, k1, kb, kappaf, ang[i].k, 1);
+	  if (type == -9999) {
+	    nleft++;
+	    continue;
+	  }
+	  if (ik == -1) {
+	    ia[i] |= 1;
+	  } else {
+	    ia[i] |= 2;
+	  }
+	  if (n_egrid > 1) {
+	    UVIP3P(np, n_egrid, log_egrid, ai_pk, nt, &log_e, &s);
+	  } else {
+	    s = ai_pk[0];
+	  }
+	  ip = (ik == -1)? ij:(ij+1);
+	  p[ip] += s*ang[i].coeff;
 	}
-	ip = (ik == -1)? ij:(ij+1);
-	p[ip] += s*ang[i].coeff;
       }
-    }    
+      if (nleft == 0) break;
+    }
     free(ang);
+    //aicache.az[ic] = NULL;
+    //aicache.nz[ic] = 0;
+    free(ia);
   }
   
   nzfb = AngularZFreeBound(&zfb, f, rec);
@@ -1310,8 +1430,9 @@ int AutoionizeRate(double *rate, double *e, int rec, int f, int msub) {
       p[ip] += s*zfb[i].coeff;
     }
     free(zfb);
+    //aicache.azf[ic] = NULL;
+    //aicache.nzf[ic] = 0;
   }
-  if (nz <= 0 && nzfb <= 0) return -1;
 
   if (!msub) {
     r = 0.0;
@@ -1405,7 +1526,8 @@ int AIRadial1E(double *ai_pk, int kb, int kappaf) {
   return 0;
 }  
 
-int AIRadialPk(double **ai_pk, int k0, int k1, int kb, int kappaf, int k) {
+int AIRadialPk(double **ai_pk, int k0, int k1, int kb, int kappaf,
+	       int k, int trylock) {
   int i, kf;
   int ks[4];
   double e, sd, se;
@@ -1421,16 +1543,29 @@ int AIRadialPk(double **ai_pk, int k0, int k1, int kb, int kappaf, int k) {
   index[2] = k0;
   index[3] = k1;
   index[4] = k/2;
-
-  p = (double **) MultiSet(pk_array, index, NULL, 
+  LOCK *lock = NULL;
+  int locked = 0;
+  p = (double **) MultiSet(pk_array, index, NULL, &lock,
 			   InitPointerData, FreeRecPkData);
+  if (lock && !(*p)) {
+    if (trylock) {
+      if (0 == TryLock(lock)) {
+	locked = 1;
+      } else {
+	return -9999;
+      }
+    } else {
+      SetLock(lock);
+      locked = 1;
+    }
+  }
   if (*p) {
     *ai_pk = *p;
+    if (locked) ReleaseLock(lock);
     return 0;
   } 
- 
-  (*p) = (double *) malloc(sizeof(double)*n_egrid);
-  *ai_pk = *p;
+  double *pd = (double *) malloc(sizeof(double)*n_egrid);
+  *ai_pk = pd;
   for (i = 0; i < n_egrid; i++) {
     e = egrid[i];
     kf = OrbitalIndex(0, kappaf, e);
@@ -1441,8 +1576,130 @@ int AIRadialPk(double **ai_pk, int k0, int k1, int kb, int kappaf, int k) {
     SlaterTotal(&sd, &se, NULL, ks, k, 0);
     (*ai_pk)[i] = sd+se;
   }
-
+  *p = pd;
+  if (locked) ReleaseLock(lock);
+#pragma omp flush
   return 0;
+}
+
+void ProcessAICache(int msub, int iuta, TFILE *f) {
+  int ic, iz, ilow, iup, skip;
+
+  if (!iuta) {
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(ic, ilow, iup, skip)
+    {
+      for (ic = 0; ic < aicache.nc; ic++) {
+	ilow = aicache.low[ic];
+	iup = aicache.up[ic];
+	skip = SkipMPI();
+	if (skip) continue;
+	aicache.nz[ic] = AngularZxZFreeBound(&aicache.az[ic], iup, ilow);
+	aicache.nzf[ic] = AngularZFreeBound(&aicache.azf[ic], iup, ilow);
+      }
+    }
+    /*
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(ic, iz, skip)
+    {
+      int jf, kb, k0, k1, kappafp, klfp, ij, ik, type, kappaf, klf;
+      double *ai_pk;
+      for (ic = 0; ic < aicache.nc; ic++) {
+	skip = SkipMPI();
+	if (skip) continue;
+	LEVEL *lev1 = GetLevel(aicache.low[ic]);
+	LEVEL *lev2 = GetLevel(aicache.up[ic]);
+	int j1 = lev1->pj;
+	int j2 = lev2->pj;
+	DecodePJ(j1, NULL, &j1);
+	DecodePJ(j2, NULL, &j2);
+	int jmin = abs(j1-j2);
+	for (iz = 0; iz < aicache.nz[ic]; iz++) {
+	  jf = aicache.az[ic][iz].k0;
+	  kb = aicache.az[ic][iz].k1;
+	  k0 = aicache.az[ic][iz].k2;
+	  k1 = aicache.az[ic][iz].k3;
+	  kappafp = GetOrbital(kb)->kappa;
+	  klfp = GetLFromKappa(kappafp);
+	  kappafp = GetOrbital(k0)->kappa;
+	  klfp += GetLFromKappa(kappafp);
+	  kappafp = GetOrbital(k1)->kappa;
+	  klfp += GetLFromKappa(kappafp);
+	  ij = jf-jmin;
+	  for (ik = -1; ik <= 1; ik += 2) {
+	    klf = jf + ik;
+	    if (IsOdd((klfp+klf)/2)) continue;
+	    kappaf = GetKappaFromJL(jf, klf);
+	    type = AIRadialPk(&ai_pk, k0, k1, kb, kappaf,
+			      aicache.az[ic][iz].k, 1);
+	  }
+	}
+      }
+      MPrintf(-1, "tpk0: %g %g\n", tpk0, tpk1);
+    }
+    wt1=WallTime();
+    printf("aip: %g %g %g\n", wt1-wt0, tpk0, tpk1);
+    wt0=wt1;
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(ic, iz, skip)
+    {
+      double ai_pk0[MAXNE];
+      int kb, kappaf;
+      for (ic = 0; ic < aicache.nc; ic++) {
+	skip = SkipMPI();
+	if (skip) continue;
+	for (iz = 0; iz < aicache.nzf[ic]; iz++) {
+	  kb = aicache.azf[ic][iz].kb;
+	  kappaf = GetOrbital(kb)->kappa;
+	  AIRadial1E(ai_pk0, kb, kappaf);
+	}
+      }
+    }
+    wt1 = WallTime();
+    printf("aie: %g\n", wt1-wt0);
+    */
+  }    
+  ResetWidMPI();
+#pragma omp parallel default(shared) private(ic, ilow, iup, skip)
+  {
+    float rt[MAXAIM];
+    double e, s[MAXAIM], s1;
+    int k, t;
+    AI_RECORD r;
+    AIM_RECORD r1;
+    for (ic = 0; ic < aicache.nc; ic++) {
+      skip = SkipMPI();
+      if (skip) continue;
+      ilow = aicache.low[ic];
+      iup = aicache.up[ic];
+      e = aicache.e[ic];
+      if (iuta) {
+	k = AutoionizeRateUTA(s, &e, ilow, iup);
+      } else {
+	k = AutoionizeRate(s, &e, ilow, iup, msub);
+      }
+      if (k < 0) continue;
+      if (!msub) {
+	if (s[0] < ai_cut) continue;
+	r.b = ilow;
+	r.f = iup;
+	r.rate = s[0];
+	WriteAIRecord(f, &r);
+      } else {
+	r1.rate = rt;
+	s1 = 0;
+	for (t = 0; t < k; t++) {
+	  r1.rate[t] = s[t];
+	  s1 += s[t];
+	}
+	if (s1 < ai_cut) continue;
+	r1.b = ilow;
+	r1.f = iup;
+	r1.nsub = k;
+	WriteAIMRecord(f, &r1);
+      }
+    }
+  }
 }
 
 int PrepRREGrids(double e, double emax0) { 
@@ -1652,7 +1909,7 @@ int SaveRRMultipole(int nlow, int *low, int nup, int *up, char *fn, int m) {
   }
   
   fclose(f);
-  ArrayFree(&subte, NULL);
+  ArrayFreeLock(&subte, NULL);
   ReinitRecombination(1);
 
   return 0;
@@ -1661,7 +1918,7 @@ int SaveRRMultipole(int nlow, int *low, int nup, int *up, char *fn, int m) {
 int SaveRecRR(int nlow, int *low, int nup, int *up, 
 	      char *fn, int m) {
   int i, j, k, ie, ip;
-  FILE *f;
+  TFILE *f;
   double rqu[MAXNUSR], qc[NPARAMS+1];
   double eb;
   LEVEL *lev1, *lev2;
@@ -1700,7 +1957,16 @@ int SaveRecRR(int nlow, int *low, int nup, int *up,
   if (k == 0) {
     return 0;
   }
-  
+  /*
+#if USE_MPI == 2
+  int mr, nr;
+  mr = MPIRank(&nr);
+  if (nr > 1) {
+    RandIntList(nup, up);
+    RandIntList(nlow, low);
+  }
+#endif
+  */
   if (tegrid[0] < 0) {
     te_set = 0;
   } else {
@@ -1739,11 +2005,9 @@ int SaveRecRR(int nlow, int *low, int nup, int *up,
 
   if (qk_mode == QK_FIT) {
     nqk = NPARAMS+1;
-    r.params = (float *) malloc(sizeof(float)*nqk);
   } else {
     nqk = 0;
   }
-
   fhdr.type = DB_RR;
   strcpy(fhdr.symbol, GetAtomicSymbol());
   fhdr.atom = GetAtomicNumber();
@@ -1823,17 +2087,23 @@ int SaveRecRR(int nlow, int *low, int nup, int *up,
     rr_hdr.usr_egrid = usr_egrid;
     rr_hdr.egrid_type = egrid_type;
     rr_hdr.usr_egrid_type = usr_egrid_type;
-    
-    r.strength = (float *) malloc(sizeof(float)*n_usr);
-    
+        
     InitFile(f, &fhdr, &rr_hdr);
-    
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(r, i, j, lev1, lev2, e, nq, ip, ie, rqu, qc, eb)
+    {
+    if (qk_mode == QK_FIT) {
+      r.params = (float *) malloc(sizeof(float)*nqk);
+    }
+    r.strength = (float *) malloc(sizeof(float)*n_usr);
     for (i = 0; i < nup; i++) {
       lev1 = GetLevel(up[i]);
       for (j = 0; j < nlow; j++) {
 	lev2 = GetLevel(low[j]);
 	e = lev1->energy - lev2->energy;
 	if (e < e0 || e >= e1) continue;
+	int skip = SkipMPI();
+	if (skip) continue;
 	if (iuta) {
 	  nq = BoundFreeOSUTA(rqu, qc, &eb, low[j], up[i], m);
 	} else {
@@ -1855,25 +2125,24 @@ int SaveRecRR(int nlow, int *low, int nup, int *up,
 	}
 	WriteRRRecord(f, &r);
       }
-    }      
-
-    DeinitFile(f, &fhdr);
-    
+    }
+    if (qk_mode == QK_FIT) {
+      free(r.params);
+    }
     free(r.strength);
+    }
+    
+    DeinitFile(f, &fhdr);    
     ReinitRadial(1);
     FreeRecQk();
     FreeRecPk();
     
     e0 = e1;
   }
-
-  if (qk_mode == QK_FIT) {
-    free(r.params);
-  }
       
   ReinitRecombination(1);
 
-  ArrayFree(&subte, NULL);
+  ArrayFreeLock(&subte, NULL);
   CloseFile(f, &fhdr);
 
   return 0;
@@ -1894,10 +2163,9 @@ int SaveAI(int nlow, int *low, int nup, int *up, char *fn,
   AI_HEADER ai_hdr;
   AIM_HEADER ai_hdr1;
   F_HEADER fhdr;
-  double emin, emax;
-  double e, s, tai, a, s1[MAXAIM];
+  double emin, emax, e, a, s, s1[MAXAIM];
   float rt[MAXAIM];
-  FILE *f;
+  TFILE *f;
   ARRAY subte;
   double c, e0, e1, b;
   int isub, n_egrid0;
@@ -1929,7 +2197,11 @@ int SaveAI(int nlow, int *low, int nup, int *up, char *fn,
   if (k == 0) {
     return 0;
   }
-
+  /*
+  if (!iuta) {
+    AllocAICache();
+  }
+  */
   if (egrid[0] < 0) {
     e_set = 0;
   } else {
@@ -2016,13 +2288,20 @@ int SaveAI(int nlow, int *low, int nup, int *up, char *fn,
       ai_hdr1.egrid = egrid;
       InitFile(f, &fhdr, &ai_hdr1);
     }
+#pragma omp parallel default(shared) private(i, j, lev1, lev2, e, k, s, r, r1, s1, t)
+    {
     for (i = 0; i < nlow; i++) {
-      lev1 = GetLevel(low[i]);
+      int ilow = low[i];
+      lev1 = GetLevel(ilow);
       for (j = 0; j < nup; j++) {
-	lev2 = GetLevel(up[j]);
+	int iup = up[j];
+	lev2 = GetLevel(iup);	
 	e = lev1->energy - lev2->energy;
-	if (e < 0 && lev1->ibase != up[j]) e -= eref;
+	if (e < 0 && lev1->ibase != iup) e -= eref;
 	if (e < e0 || e >= e1) continue;
+	
+	int skip = SkipMPI();
+	if (skip) continue;
 	if (!msub) {
 	  if (iuta) {
 	    k = AutoionizeRateUTA(&s, &e, low[i], up[j]);
@@ -2052,9 +2331,25 @@ int SaveAI(int nlow, int *low, int nup, int *up, char *fn,
 	}
       }
     }
-
+    }
+    /*
+      aicache.low[ic] = ilow;
+      aicache.up[ic] = iup;
+      aicache.e[ic] = e;
+      ic++;
+      if (ic == maxaicache) {
+      aicache.nc = ic;
+      ic = 0;
+      ProcessAICache(msub, iuta, f);
+      }
+      }
+      }
+      if (ic > 0) {
+      aicache.nc = ic;
+      ProcessAICache(msub, iuta, f);
+      }
+    */
     DeinitFile(f, &fhdr);
-
     ReinitRadial(1);
     FreeRecQk();
     FreeRecPk();
@@ -2063,10 +2358,9 @@ int SaveAI(int nlow, int *low, int nup, int *up, char *fn,
   }
 
   ReinitRecombination(1);
-  
-  ArrayFree(&subte, NULL);
+  //FreeAICache(0);
+  ArrayFreeLock(&subte, NULL);
   CloseFile(f, &fhdr);
-
 #ifdef PERFORM_STATISTICS
   GetStructTiming(&structt);
   fprintf(perform_log, "AngZMix: %6.1E, AngZFB: %6.1E, AngZxZFB: %6.1E, SetH: %6.1E DiagH: %6.1E\n",
@@ -2402,7 +2696,7 @@ int InitRecombination(void) {
   ndim = 5;
   for (i = 0; i < ndim; i++) blocks[i] = MULTI_BLOCK5;
   pk_array = (MULTI *) malloc(sizeof(MULTI));
-  MultiInit(pk_array, sizeof(double *), ndim, blocks);
+  MultiInit(pk_array, sizeof(double *), ndim, blocks, "rpk_array");
   
   ndim = 3;
   for (i = 0; i < ndim; i++) blocks[i] = MULTI_BLOCK3;
@@ -2410,7 +2704,7 @@ int InitRecombination(void) {
   blocks[0] = 10;
   blocks[1] = 10;
   blocks[2] = 4;
-  MultiInit(qk_array, sizeof(double *), ndim, blocks);  
+  MultiInit(qk_array, sizeof(double *), ndim, blocks, "rqk_array");  
   
   hyd_qk_array = (ARRAY *) malloc(sizeof(ARRAY));
   ArrayInit(hyd_qk_array, sizeof(double *), 32);
@@ -2431,6 +2725,8 @@ int InitRecombination(void) {
 
   SetRecQkMode(QK_DEFAULT, 0.1);
   SetRecPWOptions(RECLMAX, RECLMAX);
+
+  SetMaxAICache(-1);
   return 0;
 }
 

@@ -24,8 +24,8 @@ import sys
 import time
 import copy
 import string
-import cPickle
-import pprint        
+import pickle
+import pprint
 
 def tabulate_trates(dfile, neles, z=26, pref='Fe'):
     tbl = TABLE(fname=dfile,
@@ -66,8 +66,10 @@ def tabulate_trates(dfile, neles, z=26, pref='Fe'):
     tbl.write_header()
     for k in neles:
         dir0 = '%s%02d/'%(pref, k)
-        rates2 = cPickle.load(open(dir0+'rates2.sav', 'r'))
-        rates3 = cPickle.load(open(dir0+'rates3.sav', 'r'))
+        with open(dir0+'rates2.sav', 'r') as f:
+            rates2 = pickle.load(f)
+        with open(dir0+'rates3.sav', 'r') as f:
+            rates3 = pickle.load(f)
         logt = rates2['logt']
         nt = len(logt)
         if (k == neles[0]):
@@ -187,9 +189,12 @@ def tabulate_rates(dfile, neles, z=26, pref='Fe'):
     tbl.write_header()
     for k in neles:
         dir0 = '%s%02d/'%(pref, k)
-        rates3 = cPickle.load(open(dir0+'rates3.sav', 'r'))
-        rates2 = cPickle.load(open(dir0+'rates2.sav', 'r'))
-        rates1 = cPickle.load(open(dir0+'rates1.sav', 'r'))
+        with open(dir0+'rates3.sav', 'r') as f:
+            rates3 = pickle.load(f)
+        with open(dir0+'rates2.sav', 'r') as f:
+            rates2 = pickle.load(f)
+        with open(dir0+'rates1.sav', 'r') as f:
+            rates1 = pickle.load(f)
         logt = rates2['logt']
         nt = len(logt)
         rt1 = rates1['rt']
@@ -305,9 +310,8 @@ def save_rates(rates, sfile, dfile, **kwd):
         rates['tdr'][i][1] = map(lambda x,y: x-y,
                                  rates['tdc'][i][1],
                                  rates['tre'][i-1][1])
-    f = open(sfile, 'w')
-    cPickle.dump(rates, f)
-    f.close()
+    with open(sfile, 'w') as f:
+        pickle.dump(rates, f)
 
     f = open(dfile, 'w')
     if (rates.has_key('temp')):
@@ -646,6 +650,7 @@ def spectrum(neles, temp, den, population, pref,
              suf='b', osuf='', dir0 = '', dir1= '', nion = 3,
              dist = 0, params=[-1,-1], cascade = 0, rrc = 0, ion0 = 1, 
              abund0 = 1.0, abundm = -1, abundp = -1, iprint=1,
+             frr0 = -1, fci0 = -1, frrp = -1, fcip = -1,
              ai = 1, ci = 1, rr = 1, ce = 1, eps = 1E-4, rcomp = [],
              t0=-1, t1=-1, d0=-1, d1=-1,
              mtr='', mce='', mci='', mai='', mrr=''):
@@ -665,14 +670,22 @@ def spectrum(neles, temp, den, population, pref,
                 rate = rate + get_complexes(k+1)
         if (len(rcomp) > 0):
             rate = rate + rcomp
-        print 'NELE = %d'%k
+        print('NELE = %d'%k)
         f1 = '%s%02d%s'%(pref, k-1, suf)
         f2 = '%s%02d%s'%(pref, k, suf)
         f3 = '%s%02d%s'%(pref, k+1, suf)
-        AddIon(k, 0.0, dir0+f2) 
+        AddIon(k, 0.0, dir0+f2)
+        if (frr0 > 0):
+            SetRateMultiplier(k, 3, frr0)
+        if (fci0 > 0):
+            SetRateMultiplier(k, 2, fci0)
         if (nion == 3):
             AddIon(k+1, 0.0, dir0+f3)
-        if (nion > 1):
+            if (frrp > 0):
+                SetRateMultiplier(k+1, 3, frrp)
+            if (fcip > 0):
+                SetRateMultiplier(k+1, 2, fcip)
+        if (nion > 1 and abundm > -10):
             if (k > 1 and ion0 > 0):
                 SetBlocks(0.0, dir0+f1)
             else:
@@ -680,62 +693,62 @@ def spectrum(neles, temp, den, population, pref,
         else:
             SetBlocks(-1.0)
 
-        print 'TR rates...'
+        print('TR rates...')
         SetTRRates(0)
         if mtr != '':
             ModifyRates(mtr)
         for i in range(t0, t1+1):
-            if (abundm <= 0 or abundp <= 0):
+            if (abundm < 0 or abundp < 0):
                 p1 = population[i][k-1]
                 p2 = population[i][k]
                 try:
                     p3 = population[i][k+1]
                 except:
                     p3 = p2
-            if (abundm <= 0):
+            if (abundm < 0):
                 p1 = abund0*(p1/p2)
             else:
                 p1 = abundm
-            if (abundp <= 0):
+            if (abundp < 0):
                 p3 = abund0*(p3/p2)
             else:
                 p3 = abundp
             p2 = abund0
-            print 'Temp = %10.3E'%(temp[i])
-            print 'Abund: %10.3E %10.3E %10.3E'%(p1, p2, p3)
+            print('Temp = %10.3E'%(temp[i]))
+            print('Abund: %10.3E %10.3E %10.3E'%(p1, p2, p3))
 
             dp = [dist, temp[i]]
             dp[2:] = params
             SetEleDist(*dp)
             
             if (ce > 0):
-                print 'CE rates...'
+                print('CE rates...')
                 SetCERates(1)
                 if (mce != ''):
                     ModifyRates(mce+'.t%02d'%i)
             if (nion > 1):
                 if (rr > 0):
-                    print 'RR rates...'
+                    print('RR rates...')
                     SetRRRates(0)
                     if (mrr != ''):
                         ModifyRates(mrr+'.t%02d'%i)
                 if (ci > 0):
-                    print 'CI rates...'
+                    print('CI rates...')
                     SetCIRates(1)
                     if (mci != ''):
                         ModifyRates(mci+'.t%02d'%i)
                 elif (ci < 0):
-                    print 'CI rates...'
+                    print('CI rates...')
                     SetCIRates(0)        
                     if (mci != ''):
                         ModifyRates(mci+'.t%02d'%i)            
                 if (ai > 0):
-                    print 'AI rates...'
+                    print('AI rates...')
                     SetAIRates(1)
                     if (mai != ''):
                         ModifyRates(mai+'.t%02d'%i)
                 elif (ai < 0):
-                    print 'AI rates...'
+                    print('AI rates...')
                     SetAIRates(0)
                     if (mai != ''):
                         ModifyRates(mai+'.t%02d'%i)
@@ -747,11 +760,11 @@ def spectrum(neles, temp, den, population, pref,
                 SetAbund(k+1, p3)
                 
             for d in range(d0, d1+1):
-                print 'Density = %10.3E'%den[d]
+                print('Density = %10.3E'%den[d])
                 SetEleDensity(den[d])
                 SetIteration(eps)
                 SetCascade(cascade, eps)
-                print 'Init blocks...'
+                print('Init blocks...')
                 InitBlocks()
                 s = 't%02dd%di%d%s'%(i, d, nion, osuf)
                 if (abundm > 0):
@@ -762,10 +775,11 @@ def spectrum(neles, temp, den, population, pref,
                 sp_file = dir1+'%s_%s.sp'%(f2,s)
                 rt_afile = dir1+'%sa_%s.rt'%(f2[:-1],s)
                 sp_afile = dir1+'%sa_%s.sp'%(f2[:-1],s)
-
+                dp_afile = dir1+'%sa_%s.d'%(f2[:-1],s)
                 LevelPopulation()
                 Cascade()
-
+                for dtp in range(6):
+                    DumpRates('%s%d'%(dp_afile,dtp), k, dtp, -1, 1)
                 RateTable(rt_file, rate)
                 SpecTable(sp_file, rrc)
                 if iprint:

@@ -36,8 +36,21 @@ typedef struct _REC_COMPLEX_ {
   int s1;
 } REC_COMPLEX;
 
+typedef struct _AICACHE_ {
+  int nc;
+  int *nz, *nzf;
+  ANGULAR_ZxZMIX **az;
+  ANGULAR_ZFB **azf;
+  int *low;
+  int *up;
+  double *e;
+} AICACHE;
+
 int InitRecombination(void);
 int ReinitRecombination(int m);
+void SetMaxAICache(int n);
+void AllocAICache(void);
+void FreeAICache(int m);
 int FreeRecPk(void);
 int FreeRecQk(void);
 int FreeRecAngZ(void);
@@ -70,6 +83,8 @@ double RRCrossH(double z, int n0, int kl0, double e);
 int BoundFreeMultipole(FILE *fp, int rec, int f, int m);
 int BoundFreeOS(double *rqu, double *p, 
 		double *eb, int rec, int f, int m);
+int BoundFreeOSUTA(double *rqu, double *rqc, double *eb, 
+		   int rec, int f, int m);
 int PrepRREGrids(double eth, double emax0);
 int SaveRRMultipole(int nlow, int *low, int nup, int *up, char *fn, int m);
 int SaveRecRR(int nlow, int *low, int nup, int *up, char *fn, int m);
@@ -78,9 +93,11 @@ int SaveAI(int nlow, int *low, int nup, int *up, char *fn,
 int AsymmetryPI(int k0, double e, int mx, int m, double *b);
 int SaveAsymmetry(char *fn, char *s, int mx);
 int AIRadial1E(double *pk, int kb, int kappaf);
-int AIRadialPk(double **pk, int k0, int k1, int kb, int kappaf, int k);
+int AIRadialPk(double **pk, int k0, int k1, int kb, int kappaf,
+	       int k, int trylock);
 int AutoionizeRateUTA(double *rate, double *e, int rec, int f);
 int AutoionizeRate(double *rate, double *e, int rec, int f, int msub);
+void ProcessAICache(int msub, int iuta, TFILE *f);
 int DROpen(int n, int *nlev, int **ops);
  
 #endif

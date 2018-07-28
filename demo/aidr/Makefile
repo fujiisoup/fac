@@ -1,2 +1,5 @@
-all: se_ai.py
-	python se_ai.py
+RESULTS = se.ai se.lev
+SCRIPTS = se_ai.py
+
+
+include ../Make.common

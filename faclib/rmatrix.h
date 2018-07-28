@@ -43,8 +43,8 @@ typedef struct _RMATRIX_ {
   int nsym, isym, p, j;
   double **aij;
   double et0, *et, *ec, *ek, **w0, **w1;
-  double *rmatrix[3];
-  double z, energy;
+  double **rmatrix[3];
+  double z;
 } RMATRIX;
 
 typedef struct _DCFG_ {
@@ -57,6 +57,8 @@ typedef struct _DCFG_ {
   double rgailitis, degenerate, accuracy;
   int lrw, liw;
   RMATRIX *rmx;
+  int nr, mr;
+  double energy;
 } DCFG;
 
 int InitRMatrix(void);
@@ -74,7 +76,7 @@ void RMatrixNMultipoles(int n);
 void ClearRMatrixSurface(RMATRIX *rmx);
 int ReadRMatrixSurface(FILE *f, RMATRIX *rmx, int m, int fmt);
 int WriteRMatrixSurface(FILE *f, double **wik0, double **wik1, int m, 
-			int fmt, RMATRIX *rmx);
+			int fmt, RMATRIX *rmx, HAMILTON *h);
 int RMatrixSurface(char *fn);
 int RMatrix(double e, RMATRIX *rmx, RBASIS *rbs, int m);
 int RMatrixPropogate(double *r0, double *r1, RMATRIX *rmx1);
@@ -88,8 +90,16 @@ void PropogateDirection(int m);
 int PropogateExternal(RMATRIX *rmx, RBASIS *rbs);
 void RMatrixNBatch(int n);
 void RMatrixFMode(int m);
-int RMatrixCE(char *fn, int np, char *bfn[], char *rfn[], 
+void RMatrixRefine(int n, int m, double r);
+int RefineRMatrixEGrid(int nke, double *e, int *ir, double **er, int **ipr,
+		       double de, int nde, double minde,
+		       double emin, double emax);
+int RMatrixCE(char *fn, int np, char *bfn[], char *rfn[],	      
 	      double emin, double emax, double de, int m, int mb);
+int RMatrixCEW(int np, RBASIS *rbs, RMATRIX *rmx, FILE **f, FILE *f1,
+	       int nke, double *e, int *ip, double **s, double **s0,
+	       int m, int mb, double de, int nde, double minde,
+	       double emin, double emax, int idep);
 int RMatrixConvert(char *ifn, char *ofn, int m);
 void TestRMatrix(double e, int m, char *fn1, char *fn2, char *fn3);
 

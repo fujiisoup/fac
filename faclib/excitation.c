@@ -17,6 +17,7 @@
  */
 
 #include "excitation.h"
+#include "transition.h"
 #include "cf77.h"
 
 static char *rcsid="$Id$";
@@ -71,6 +72,7 @@ static double xborn = XBORN;
 static double xborn0 = XBORN0;
 static double xborn1 = XBORN1;
 static double eborn = EBORN;
+#pragma omp threadprivate (kgrid, log_kgrid, kint, log_kint, gos1, gos2, gost, gosint)
 
 static FILE *fpw=NULL;
 
@@ -79,6 +81,9 @@ static EXCIT_TIMING timing = {0, 0, 0};
 #endif
 
 static CEPW_SCRATCH pw_scratch = {1, MAXKL, 100, 5E-2, 0, 0, 10};
+
+static int maxcecache = MAXCECACHE;
+static CECACHE cecache = {0};
 
 static MULTI *pk_array;
 static MULTI *qk_array;
@@ -92,6 +97,120 @@ static void InitCEPK(void *p, int n) {
   for (i = 0; i < n; i++) {
     d[i].nkl = -1;
   }
+}
+
+void SetMaxCECache(int n) {
+  if (n > 0) {
+    maxcecache = n;
+  } else {
+    maxcecache = MAXCECACHE;
+  }
+  FreeCECache(0);
+}
+
+void AllocCECache(int msub) {
+  cecache.msub = msub;
+  cecache.low = malloc(sizeof(int)*maxcecache);
+  cecache.up = malloc(sizeof(int)*maxcecache);
+  cecache.nz = malloc(sizeof(int)*maxcecache);
+  cecache.az = malloc(sizeof(ANGULAR_ZMIX *)*maxcecache);
+  cecache.nmk = malloc(sizeof(int)*maxcecache);
+  cecache.mbk = malloc(sizeof(double *)*maxcecache);
+  int i;
+  for (i = 0; i < maxcecache; i++) {
+    cecache.low[i] = -1;
+    cecache.up[i] = -1;
+    cecache.nz[i] = 0;
+    cecache.az[i] = NULL;
+    cecache.nmk[i] = 0;
+    cecache.mbk[i] = NULL;
+  }
+  cecache.ks = NULL;
+  cecache.kd0 = NULL;
+  cecache.kd1 = NULL;
+  cecache.pk = NULL;
+  cecache.qk = NULL;
+}
+
+void FreeCEQKK(CEQKK *qk, int msub) {
+  int nk, i;
+  nk = qk->kmax-qk->kmin+1;
+  if (msub) nk *= qk->kmaxp-qk->kminp+1;
+  for (i = 0; i < nk; i++) {
+    free(qk->qk[i]);
+  }
+  free(qk->qk);
+  free(qk);
+}
+
+void FreeCEPKK(CEPKK *pk) {
+  int nk, i;
+  CEPK *dp;
+  nk = pk->kmax-pk->kmin+1;
+  for (i = 0; i < nk; i++) {
+    dp = pk->pk[i];
+    if (dp->nkl > 0) {
+      free(dp->kappa0);
+      free(dp->kappa1);
+      free(dp->pkd);
+      free(dp->pke);
+    }
+    free(dp);
+  }
+  free(pk->pk);
+  free(pk);
+}
+
+void FreeCECache(int m) {
+  int i;
+  for (i = 0; i < cecache.nc; i++) {
+    if (cecache.nz[i] > 0) {
+      if (cecache.az[i]) {
+	free(cecache.az[i]);
+	cecache.az[i] = NULL;
+      }
+      cecache.nz[i] = 0;
+    }
+    if (cecache.nmk[i] > 0) {
+      if (cecache.mbk[i]) {
+	free(cecache.mbk[i]);
+	cecache.mbk[i] = NULL;
+      }
+      cecache.nmk[i] = 0;
+    }
+  }
+  if (cecache.ks) {
+    FreeIdxAry(cecache.ks, 0);
+    free(cecache.ks);
+    cecache.ks = NULL;
+  }
+  if (cecache.kd0) {
+    FreeIdxAry(cecache.kd0, 0);
+    free(cecache.kd0);
+    cecache.kd0 = NULL;
+  }
+  if (cecache.kd1) {
+    FreeIdxAry(cecache.kd1, 0);
+    free(cecache.kd1);
+    cecache.kd1 = NULL;
+  }
+  if (cecache.pk) {
+    FreeCEPKK(cecache.pk);
+    cecache.pk = NULL;
+  }
+  if (cecache.qk) {
+    FreeCEQKK(cecache.qk, cecache.msub);
+    cecache.qk = NULL;
+  }
+  if (m == 0) {
+    free(cecache.low);
+    free(cecache.up);
+    free(cecache.nz);
+    free(cecache.az);
+    free(cecache.nmk);
+    free(cecache.mbk);
+  }
+  cecache.nc = 0;
 }
 
 void FreeExcitationPkData(void *p) {
@@ -304,7 +423,7 @@ int SetCEPWGrid(int ns, int *n, int *step) {
   return 0;
 }
 
-int CERadialPk(CEPK **pk, int ie, int k0, int k1, int k) {
+int CERadialPk(CEPK **pk, int ie, int k0, int k1, int k, int trylock) {
   int type, ko2, i, m, t, q;
   int kf0, kf1, kpp0, kpp1, km0, km1;
   int kl0, kl1, kl0p, kl1p;
@@ -338,9 +457,24 @@ int CERadialPk(CEPK **pk, int ie, int k0, int k1, int k) {
   if (IsEven(kl0 + kl1 + ko2) && Triangle(j0, j1, k)) {
     type = ko2;
   }
-
-  *pk = (CEPK *) MultiSet(pk_array, index, NULL, InitCEPK, FreeExcitationPkData);
+  LOCK *lock = NULL;
+  int locked = 0;
+  *pk = (CEPK *) MultiSet(pk_array, index, NULL, &lock,
+			  InitCEPK, FreeExcitationPkData);
+  if (lock && (*pk)->nkl < 0) {
+    if (trylock) {
+      if (0 == TryLock(lock)) {
+	locked = 1;
+      } else {
+	return -9999;
+      }
+    } else {
+      SetLock(lock);
+      locked = 1;
+    }
+  }
   if ((*pk)->nkl >= 0) {
+    if (locked) ReleaseLock(lock);
     return type;
   }
 
@@ -482,7 +616,6 @@ int CERadialPk(CEPK **pk, int ie, int k0, int k1, int k) {
     }
   }
 
-  (*pk)->nkl = t;
   (*pk)->nkappa = m;
   if (pw_type == 0) {
     (*pk)->kappa0 = ReallocNew(kappa0, sizeof(short)*m);
@@ -493,7 +626,10 @@ int CERadialPk(CEPK **pk, int ie, int k0, int k1, int k) {
   }
   (*pk)->pkd = ReallocNew(pkd, sizeof(double)*q);
   (*pk)->pke = ReallocNew(pke, sizeof(double)*q);  
-    
+  (*pk)->nkl = t;
+  
+  if (locked) ReleaseLock(lock);
+#pragma omp flush
 #ifdef PERFORM_STATISTICS
   stop = clock();
   timing.rad_qk += stop-start;
@@ -817,12 +953,12 @@ int CERadialQkBornMSub(int k0, int k1, int k2, int k3, int k, int kp,
   return Max(ko2, ko2p);
 }
 
-double *CERadialQkTable(int k0, int k1, int k2, int k3, int k) {
+double *CERadialQkTable(int k0, int k1, int k2, int k3, int k, int trylock) {
   int type, t, ie, ite, ipk, ipkp, nqk, nopb;
   int i, j, kl0, kl1, kl, nkappa, nkl, nkappap, nklp;
   CEPK *cepk, *cepkp, *tmp;
   short *kappa0, *kappa1, *kappa0p, *kappa1p;
-  double *pkd, *pke, *pkdp, *pkep;
+  double *pkd, *pke, *pkdp, *pkep, *pd;
   double r, rd, s, b, a, c;
   double qk[MAXNKL], dqk[MAXNKL];
   double rq[MAXNTE][MAXNE+1], e1, te, te0;
@@ -841,12 +977,26 @@ double *CERadialQkTable(int k0, int k1, int k2, int k3, int k) {
   index[2] = k1;
   index[3] = k2;
   index[4] = k3;
-  p = (double **) MultiSet(qk_array, index, NULL, 
+  LOCK *lock = NULL;
+  int locked = 0;
+  p = (double **) MultiSet(qk_array, index, NULL, &lock,
 			   InitPointerData, FreeExcitationQkData);
+  if (lock && !(*p)) {
+    if (trylock) {
+      if (0 == TryLock(lock)) {
+	locked = 1;
+      } else {
+	return NULL;
+      }
+    } else {
+      SetLock(lock);
+      locked = 1;
+    }
+  }
   if (*p) {
+    if (locked) ReleaseLock(lock);
     return *p;
   }   
-
   if (xborn == 0 || xborn < -1E30) {
     for (ie = 0; ie < n_egrid1; ie++) {
       if (ie == n_egrid) mb = 1;
@@ -900,9 +1050,9 @@ double *CERadialQkTable(int k0, int k1, int k2, int k3, int k) {
 	}
       }
       if (t == 0) continue;
-      type = CERadialPk(&cepk, ie, k0, k1, k);
+      type = CERadialPk(&cepk, ie, k0, k1, k, 0);
       if (k2 != k0 || k3 != k1) {
-	type = CERadialPk(&cepkp, ie, k2, k3, k);
+	type = CERadialPk(&cepkp, ie, k2, k3, k, 0);
       } else {
 	cepkp = cepk;
       }
@@ -1057,8 +1207,8 @@ double *CERadialQkTable(int k0, int k1, int k2, int k3, int k) {
     mk = GetMaxKMBPT();
     if (k/2 <= mk) t = nqk*2 + 1;
   }
-  *p = (double *) malloc(sizeof(double)*t);
-  rqc = *p;
+  pd = (double *) malloc(sizeof(double)*t);
+  rqc = pd;
 
   ptr = rqc;
   for (ite = 0; ite < n_tegrid; ite++) {
@@ -1083,11 +1233,14 @@ double *CERadialQkTable(int k0, int k1, int k2, int k3, int k) {
   stop = clock();
   timing.rad_qk += stop-start;
 #endif
-
+  if (p) *p = pd;
+  if (locked) ReleaseLock(lock);
+#pragma omp flush
   return *p;
 }
 
-double *CERadialQkMSubTable(int k0, int k1, int k2, int k3, int k, int kp) {
+double *CERadialQkMSubTable(int k0, int k1, int k2, int k3, int k, int kp,
+			    int trylock) {
   int type1, type2, kl, nqk;
   int i, j, kl0, klp0, kl0_2, klp0_2, kl1;
   CEPK *cepk, *cepkp;
@@ -1117,10 +1270,24 @@ double *CERadialQkMSubTable(int k0, int k1, int k2, int k3, int k, int kp) {
   index[2] = k1;
   index[3] = k2;
   index[4] = k3;
-
-  p = (double **) MultiSet(qk_array, index, NULL, 
+  LOCK *lock = NULL;
+  int locked = 0;
+  p = (double **) MultiSet(qk_array, index, NULL, &lock,
 			   InitPointerData, FreeExcitationQkData);
+  if (lock && !(*p)) {
+    if (trylock) {
+      if (0 == TryLock(lock)) {
+	locked = 1;
+      } else {
+	return NULL;
+      }
+    } else {
+      SetLock(lock);
+      locked = 1;
+    }
+  }
   if (*p) {
+    if (locked) ReleaseLock(lock);
     return *p;
   }
 
@@ -1130,8 +1297,8 @@ double *CERadialQkMSubTable(int k0, int k1, int k2, int k3, int k, int kp) {
     q[iq] = q[iq-1] + 2;
   }  
   nqk = nq*n_tegrid*n_egrid1;
-  *p = (double *) malloc(sizeof(double)*(nqk+1));
-  rqc = *p;
+  double *pd = (double *) malloc(sizeof(double)*(nqk+1));
+  rqc = pd;
   if (xborn == 0) {
     for (ie = 0; ie < n_egrid1; ie++) {
       e1 = egrid[ie];
@@ -1179,7 +1346,7 @@ double *CERadialQkMSubTable(int k0, int k1, int k2, int k3, int k, int kp) {
     }
     for (ie = 0; ie < n_egrid; ie++) {
       e1 = egrid[ie];
-      type1 = CERadialPk(&cepk, ie, k0, k1, k);
+      type1 = CERadialPk(&cepk, ie, k0, k1, k, 0);
       nkl = cepk->nkl;
       nkappa = cepk->nkappa;
       kappa0 = cepk->kappa0;
@@ -1190,7 +1357,7 @@ double *CERadialQkMSubTable(int k0, int k1, int k2, int k3, int k, int kp) {
 	cepkp = cepk;
 	type2 = type1;
       } else {
-	type2 = CERadialPk(&cepkp, ie, k2, k3, kp);
+	type2 = CERadialPk(&cepkp, ie, k2, k3, kp, 0);
       }
       nklp = cepkp->nkl;
       if (nklp < nkl) nkl = nklp;
@@ -1392,17 +1559,21 @@ double *CERadialQkMSubTable(int k0, int k1, int k2, int k3, int k, int kp) {
   stop = clock();
   timing.rad_qk += stop-start;
 #endif
-  
+  *p = pd;
+  if (locked) ReleaseLock(lock);
+#pragma omp flush
   return rqc;
 } 	
   
-int CERadialQk(double *rqc, double te, int k0, int k1, int k2, int k3, int k) {
+int CERadialQk(double *rqc, double te, int k0, int k1, int k2, int k3,
+	       int k, int trylock) {
   int i, np, nd, type;
   int j, m, mk;
   double *rqe, rq[MAXNTE];
   double *xte, x0;
   
-  rqe = CERadialQkTable(k0, k1, k2, k3, k);
+  rqe = CERadialQkTable(k0, k1, k2, k3, k, trylock);
+  if (rqe == NULL) return -9999;
   if (n_tegrid == 1) {
     for (i = 0; i < n_egrid1; i++) {
       rqc[i] = rqe[i];
@@ -1464,13 +1635,14 @@ int CERadialQk(double *rqc, double te, int k0, int k1, int k2, int k3, int k) {
 }
 
 int CERadialQkMSub(double *rqc, double te, int k0, int k1, int k2, int k3, 
-		   int k, int kp) {
+		   int k, int kp, int trylock) {
   int i, np, nd, iq, n;
   int j, m, type, nq;
   double *rqe, rq[MAXNTE];
   double *xte, x0;
   
-  rqe = CERadialQkMSubTable(k0, k1, k2, k3, k, kp);
+  rqe = CERadialQkMSubTable(k0, k1, k2, k3, k, kp, trylock);
+  if (rqe == NULL) return -9999;
   nq = Min(k, kp)/2 + 1;
 
   if (n_tegrid == 1) {
@@ -1678,14 +1850,14 @@ int CollisionStrengthUTA(double *qkt, double *params, double *e, double *bethe,
     q1 = idatum->s[1].nq_bra;
     q2 = idatum->s[0].nq_bra;
     k1 = OrbitalIndex(idatum->s[0].n, idatum->s[0].kappa, 0.0);
-     k0 = OrbitalIndex(idatum->s[1].n, idatum->s[1].kappa, 0.0);
+    k0 = OrbitalIndex(idatum->s[1].n, idatum->s[1].kappa, 0.0);
   }
     
   type = -1;
   kmin = abs(j1-j2);
   kmax = j1 + j2;
   for (k = kmin; k <= kmax; k += 2) {
-    ty = CERadialQk(rq, te, k0, k1, k0, k1, k);
+    ty = CERadialQk(rq, te, k0, k1, k0, k1, k, 0);
     if (ty > type) type = ty;
     for (ie = 0; ie < n_egrid1; ie++) {
       qkc[ie] += rq[ie]/(k+1.0);
@@ -1859,7 +2031,7 @@ int CollisionStrengthEB(double *qkt, double *e, double *bethe,
 	      if (fabs(ap) < EPS10) continue;
 	      r = a*ap/(ang[i].k + 1.0);
 	      k = CERadialQk(rq, te, ang[i].k0, ang[i].k1, 
-			     angp[ip].k0, angp[ip].k1, ang[i].k);
+			     angp[ip].k0, angp[ip].k1, ang[i].k, 0);
 	      for (ie = 0; ie < n_egrid1; ie++) {
 		qkc[ie] += r*rq[ie];
 		/*
@@ -1980,7 +2152,8 @@ int CollisionStrengthEBD(double *qkt, double *e, double *bethe, double *born,
 	      qb = mlev1 - mlev2;
 	      qbp = mlev1p - mlev2p;
 	      k = CERadialQkMSub(rq, te, ang[i].k0, ang[i].k1, 
-				 angp[ip].k0, angp[ip].k1, ang[i].k, angp[ip].k);
+				 angp[ip].k0, angp[ip].k1,
+				 ang[i].k, angp[ip].k, 0);
 	      for (q = -nq; q <= nq; q++) {
 		m = abs(q);	
 		ka = 0;
@@ -2058,8 +2231,7 @@ int CollisionStrength(double *qkt, double *params, double *e, double *bethe,
   int i, j, t, h, p, m, type, ty, p1, p2, gauge;  
   LEVEL *lev1, *lev2;
   double te, c, r, s3j, c1, c2, *mbk, aw;
-  ANGULAR_ZMIX *ang;
-  int nz, j1, j2, ie, nk, np, nq, kkp, nmk;
+  int j1, j2, ie, nk, np, nq, kkp, nmk;
   double rq[MAXMSUB*(MAXNE+1)];
   double qkc[MAXMSUB*(MAXNE+1)];
   double *rqk, *rqkt, tol;
@@ -2070,7 +2242,24 @@ int CollisionStrength(double *qkt, double *params, double *e, double *bethe,
   double born_egrid, born_cross, bt, ubt[MAXNUSR];
   double bte, bms;
   FORM_FACTOR *bform;
+  int nz;
+  ANGULAR_ZMIX *ang;
 
+  /*
+  nz = cecache.nz[ic];
+  ang = cecache.az[ic];
+  nmk = cecache.nmk[ic];
+  mbk = cecache.mbk[ic];
+  if (nz <= 0) {
+    if (nmk > 0) {
+      free(mbk);
+      cecache.nmk[ic] = 0;
+      cecache.mbk[ic] = NULL;
+    }
+    cecache.az[ic] = NULL;
+    return -1;
+  }
+  */
   lev1 = GetLevel(lower);
   if (lev1 == NULL) return -1;
   lev2 = GetLevel(upper);
@@ -2110,80 +2299,114 @@ int CollisionStrength(double *qkt, double *params, double *e, double *bethe,
   }
 
   type = -1;
+  short **ia;
+  ia = malloc(sizeof(short *)*nz);
   for (i = 0; i < nz; i++) {
+    ia[i] = malloc(sizeof(short)*nz);
     for (j = i; j < nz; j++) {
-      c = ang[i].coeff * ang[j].coeff;
-      if (fabs(c) < EPS30) continue;
-      if (i != j) c *= 2.0;
-      if (!msub) {
-	if (ang[i].k != ang[j].k) continue;
-	c /= ang[i].k + 1.0;
-	if (fpw) {
-	  fprintf(fpw, "# %3d %3d %12.5E %12.5E %2d %2d %2d\n", 
-		  lower, upper, te*HARTREE_EV, 8.0*c, ang[i].k, n_tegrid, n_egrid);
+      ia[i][j] = 0;
+    }
+  }
+  //int iter = 0;
+  while (1) {
+    //iter++;
+    int nleft = 0;
+    for (i = 0; i < nz; i++) {
+      for (j = i; j < nz; j++) {
+	if (ia[i][j]) continue;
+	c = ang[i].coeff * ang[j].coeff;
+	if (fabs(c) < EPS30) {
+	  ia[i][j] = 1;
+	  continue;
 	}
-	ty = CERadialQk(rq, te, ang[i].k0, ang[i].k1,
-			ang[j].k0, ang[j].k1, ang[i].k);
-	t = ang[i].k/2;
-	if (ty >= 0 && t > 0 && t <= nmk) {
-	  c1 = AngZCorrection(nmk, mbk, ang+i, t);
-	  if (i == j) c2 = c1;
-	  else {
-	    c2 = AngZCorrection(nmk, mbk, ang+j, t);
+	if (i != j) c *= 2.0;
+	if (!msub) {
+	  if (ang[i].k != ang[j].k) {
+	    ia[i][j] = 1;
+	    continue;
 	  }
-	  if (gauge == G_COULOMB) {
-	    c1 /= aw;
-	    c2 /= aw;
+	  c /= ang[i].k + 1.0;
+	  if (fpw) {
+	    fprintf(fpw, "# %3d %3d %12.5E %12.5E %2d %2d %2d\n", 
+		    lower, upper, te*HARTREE_EV, 8.0*c,
+		    ang[i].k, n_tegrid, n_egrid);
 	  }
-	  c1 = c*(1.0+c1)*(1.0+c2);
-	} else {
-	  c1 = c;
-	}
-	if (fpw) {
-	  fprintf(fpw, "\n\n");
-	}
-	if (ty > type) type = ty;	  
-	if (ty >= 0 && t > 0 && t <= nmk) {
-	  for (ie = 0; ie < n_egrid1; ie++) {
-	    qkc[ie] += c1*(rq[ie+n_egrid1]) + c*(rq[ie]-rq[ie+n_egrid1]);
-	    qkc[ie+n_egrid1] += c*rq[ie];
+	  ty = CERadialQk(rq, te, ang[i].k0, ang[i].k1,
+			  ang[j].k0, ang[j].k1, ang[i].k, 1);
+	  if (ty == -9999) {
+	    nleft++;
+	    continue;
 	  }
-	} else {
-	  for (ie = 0; ie < n_egrid1; ie++) {
-	    qkc[ie] += c*rq[ie];
-	    qkc[ie+n_egrid1] += c*rq[ie];
-	  }
-	}
-      } else {
-	ty = CERadialQkMSub(rq, te, ang[i].k0, ang[i].k1,
-			    ang[j].k0, ang[j].k1, ang[i].k, ang[j].k);
-	nq = Min(ang[i].k, ang[j].k);
-	kkp = (ang[i].k + ang[j].k)/2;
-	if (ty > type) type = ty;
-	rqk = qkc;
-	for (t = -j1; t <= 0; t += 2) {
-	  for (h = -j2; h <= j2; h += 2) {
-	    m = t-h;
-	    if (abs(m) <= nq) {
-	      s3j = W3j(j1, ang[i].k, j2, -t, m, h);
-	      if (ang[j].k != ang[i].k) {
-		s3j *= W3j(j1, ang[j].k, j2, -t, m, h);
-	      } else {
-		s3j *= s3j;
-	      }
-	      if (m < 0 && IsOdd(kkp)) s3j = -s3j;
-	      m = (abs(m)*n_egrid1)/2;
-	      for (ie = 0; ie < n_egrid1; ie++) {
-		rqk[ie] += c*rq[m+ie]*s3j;
-	      }
+	  ia[i][j] = 1;
+	  t = ang[i].k/2;
+	  if (ty >= 0 && t > 0 && t <= nmk) {
+	    c1 = AngZCorrection(nmk, mbk, ang+i, t);
+	    if (i == j) c2 = c1;
+	    else {
+	      c2 = AngZCorrection(nmk, mbk, ang+j, t);
 	    }
-	    rqk += n_egrid1;
+	    if (gauge == G_COULOMB) {
+	      c1 /= aw;
+	      c2 /= aw;
+	    }
+	    c1 = c*(1.0+c1)*(1.0+c2);
+	  } else {
+	    c1 = c;
+	  }
+	  if (fpw) {
+	    fprintf(fpw, "\n\n");
+	  }
+	  if (ty > type) type = ty;	  
+	  if (ty >= 0 && t > 0 && t <= nmk) {
+	    for (ie = 0; ie < n_egrid1; ie++) {
+	      qkc[ie] += c1*(rq[ie+n_egrid1]) + c*(rq[ie]-rq[ie+n_egrid1]);
+	      qkc[ie+n_egrid1] += c*rq[ie];
+	    }
+	  } else {
+	    for (ie = 0; ie < n_egrid1; ie++) {
+	      qkc[ie] += c*rq[ie];
+	      qkc[ie+n_egrid1] += c*rq[ie];
+	    }
+	  }
+	} else {
+	  ty = CERadialQkMSub(rq, te, ang[i].k0, ang[i].k1,
+			      ang[j].k0, ang[j].k1, ang[i].k, ang[j].k, 1);
+	  if (ty == -9999) {
+	    nleft++;
+	    continue;
+	  }
+	  nq = Min(ang[i].k, ang[j].k);
+	  kkp = (ang[i].k + ang[j].k)/2;
+	  if (ty > type) type = ty;
+	  rqk = qkc;
+	  for (t = -j1; t <= 0; t += 2) {
+	    for (h = -j2; h <= j2; h += 2) {
+	      m = t-h;
+	      if (abs(m) <= nq) {
+		s3j = W3j(j1, ang[i].k, j2, -t, m, h);
+		if (ang[j].k != ang[i].k) {
+		  s3j *= W3j(j1, ang[j].k, j2, -t, m, h);
+		} else {
+		  s3j *= s3j;
+		}
+		if (m < 0 && IsOdd(kkp)) s3j = -s3j;
+		m = (abs(m)*n_egrid1)/2;
+		for (ie = 0; ie < n_egrid1; ie++) {
+		  rqk[ie] += c*rq[m+ie]*s3j;
+		}
+	      }
+	      rqk += n_egrid1;
+	    }
 	  }
 	}
       }
     }
+    if (nleft == 0) break;
   }
-
+  for (i = 0; i < nz; i++) {
+    free(ia[i]);
+  }
+  free(ia);
   BornFormFactorTE(&bte);
   bms = BornMass();
   bte = (te + bte)/bms;
@@ -2275,8 +2498,15 @@ int CollisionStrength(double *qkt, double *params, double *e, double *bethe,
   }
 
   free(ang);
-  if (nmk > 0) free(mbk);
-  
+  /*
+  cecache.az[ic] = NULL;
+  cecache.nz[ic] = 0;
+  if (nmk > 0) {
+    free(mbk);
+    cecache.nmk[ic] = 0;
+    cecache.mbk[ic] = NULL;
+  }
+  */
   /* there is a factor of 4 coming from normalization and the 2 
      from the formula */
   if (!msub) {
@@ -2424,6 +2654,303 @@ int CollisionStrength(double *qkt, double *params, double *e, double *bethe,
   }
 }
 
+void ProcessCECache(int msub, int iuta, TFILE *f) {
+  int ic, iz, jz, ie, skip, ilow, iup, nparams;
+
+  if (qk_mode == QK_FIT) 
+    nparams = NPARAMS;
+  else
+    nparams = 0;
+
+  if (!iuta) {
+    /*
+    int nb = GetNumBounds();
+    int i, *kb;
+    kb = malloc(sizeof(int)*nb);
+    for (i = 0; i < nb; i++) kb[i] = 0;
+    */
+    ResetWidMPI();    
+#pragma omp parallel default(shared) private(ic, iz, ilow, iup, skip)
+    {
+      for (ic = 0; ic < cecache.nc; ic++) {
+	ilow = cecache.low[ic];
+	iup = cecache.up[ic];
+	skip = SkipMPI();
+	if (skip) continue;
+	cecache.nz[ic] = AngularZMix(&cecache.az[ic], ilow, iup,
+				     -1, -1,
+				     &cecache.nmk[ic],
+				     &cecache.mbk[ic]);
+	/*
+	for (iz = 0; iz < cecache.nz[ic]; iz++) {
+	  if (cecache.az[ic][iz].k0 != cecache.az[ic][iz].k1) {
+	    kb[cecache.az[ic][iz].k0] |= 1;
+	    kb[cecache.az[ic][iz].k1] |= 2;
+	  } else {
+	    kb[cecache.az[ic][iz].k0] |= 4;
+	  }
+	}
+	*/
+      }
+    }
+    /*
+    int nks, nkd0, nkd1;
+    nks = 0;
+    nkd0 = 0;
+    nkd1 = 0;
+    for (i = 0; i < nb; i++) {
+      if (kb[i] == 4) nks++;
+      else {
+	if (kb[i] & 1) nkd0++;
+	if (kb[i] & 2) nkd1++;
+      }
+    }
+    int *ks = NULL, *kd0 = NULL, *kd1 = NULL;
+    if (nks > 0) {
+      ks = malloc(sizeof(int)*nks);
+    }
+    if (nkd0 > 0) {
+      kd0 = malloc(sizeof(int)*nkd0);
+    }
+    if (nkd1 > 0) {
+      kd1 = malloc(sizeof(int)*nkd1);
+    }    
+    int is = 0, i0 = 0, i1 = 0;
+    for (i = 0; i < nb; i++) {
+      if (kb[i] == 4) ks[is++] = i;
+      else {
+	if (kb[i] & 1) kd0[i0++] = i;
+	if (kb[i] & 2) kd1[i1++] = i;
+      }
+    }
+    IDXARY *iks = NULL, *ikd0 = NULL, *ikd1 = NULL;
+    if (nks > 0) {
+      iks = malloc(sizeof(IDXARY));
+      InitIdxAry(iks, nks, ks);
+    }
+    if (nkd0 > 0) {
+      ikd0 = malloc(sizeof(IDXARY));
+      InitIdxAry(ikd0, nkd0, kd0);
+    }
+    if (nkd1 > 0) {
+      ikd1 = malloc(sizeof(IDXARY));
+      InitIdxAry(ikd1, nkd1, kd1);
+    }
+
+    CEPKK *pk = NULL;
+    int npk = nks + nkd0*nkd1;
+    pk = malloc(sizeof(CEPKK)*npk);
+    for (i = 0; i < npk; i++) {
+      pk[i].kmin = (short)5000;
+      pk[i].kmax = 0;
+    }
+    ORBITAL *orb0, *orb1;
+    int j0, j1, jmin, jmax, k, j, m;
+    for (i = 0; i < nks; i++) {
+      orb0 = GetOrbital(ks[i]);
+      j0 = GetJFromKappa(orb0->kappa);
+      pk[i].kmin = 0;
+      pk[i].kmax = Max(j0, pk[i].kmax);
+    }
+    for (i = 0; i < nkd0; i++) {
+      orb0 = GetOrbital(kd0[i]);
+      j0 = GetJFromKappa(orb0->kappa);
+      for (j = 0; j < nkd1; j++) {
+	orb1 = GetOrbital(kd1[j]);
+	j1 = GetJFromKappa(orb1->kappa);
+	jmin = abs(j0-j1)/2;
+	jmax = (j0+j1)/2;
+	k = nks + i0*nkd1+i1;
+	pk[k].kmin = Max(pk[k].kmin, jmin);
+	pk[k].kmax = Min(pk[k].kmax, jmax);
+      }
+    }
+    for (i = 0; i < npk; i++) {
+      pk[i].pk = malloc(sizeof(CEPK *)*(pk[i].kmax-pk[i].kmin+1));
+      m = 0;
+      for (k = pk[i].kmin; k <= pk[i].kmax; k++, m++) {
+	pk[i].pk[m] = NULL;
+      }
+    }
+    CEQKK *qk = NULL;
+    int nks2 = nks*(1+nks)/2;
+    int nkd01 = nkd0*nkd1;
+    int nksd = nks*nkd01;
+    int nkd2 = nkd01*(1+nkd01)/2;
+    int nqk = nks*(1+nks)/2 + nks*nkd01 + nkd2;
+    int p, q;
+    qk = malloc(sizeof(CEQKK)*nqk);
+    for (i = 0; i < nks; i++) {
+      for (j = 0; j <= i; j++) {
+	m = i*(i+1)/2 + j;
+	qk[m].kmin = pk[i].kmin;
+	qk[m].kmax = pk[i].kmax;
+	qk[m].kminp = pk[j].kmin;
+	qk[m].kmaxp = pk[j].kmax;
+      }
+      for (i0 = 0; i0 < nkd01; i0++) {
+	m = nks2+i*nkd01+i0;
+	qk[m].kmin = pk[i].kmin;
+	qk[m].kmax = pk[i].kmax;
+	qk[m].kminp = pk[i0].kmin;
+	qk[m].kmaxp = pk[i0].kmax;
+      }
+    }
+    for (i0 = 0; i < nkd01; i0++) {
+      for (i1 = 0; i1 <= i0; i1++) {
+	m = nks2+nks*nkd01 + i0*(i0+1)/2 + i1;
+	qk[m].kmin = pk[i0].kmin;
+	qk[m].kmax = pk[i0].kmax;
+	qk[m].kminp = pk[i1].kmin;
+	qk[m].kmaxp = pk[i1].kmax;
+      }
+    }
+
+    for (i = 0; i < nqk; i++) {
+      if (msub) {
+	p = qk[i].kmax-qk[i].kmin+1;
+	q = qk[i].kmaxp-qk[i].kminp+1;
+	qk[i].qk = malloc(sizeof(double *)*p*q);
+	m = 0;
+	for (k = qk[i].kmin; k <= qk[i].kmax; k++) {
+	  for (j = qk[i].kminp; j <= qk[i].kmaxp; j++, m++) {
+	    qk[i].qk[m] = NULL;
+	  }
+	}
+      } else {
+	qk[i].kmin = Max(qk[i].kmin, qk[i].kminp);
+	qk[i].kmax = Min(qk[i].kmax, qk[i].kmaxp);
+	qk[i].qk = malloc(sizeof(double *)*(qk[i].kmax-qk[i].kmin+1));
+	m = 0;
+	for (k = qk[i].kmin; k <= qk[i].kmax; k++, m++) {
+	  qk[i].qk[m] = NULL;
+	}
+      }
+    }
+
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(ic, skip, iz, ie)
+    {
+      for (ic = 0; ic < cecache.nc; ic++) {
+	skip = SkipMPI();
+	if (skip) continue;
+	for (iz = 0; iz < cecache.nz[ic]; iz++) {
+	  for (ie = 0; ie < n_egrid; ie++) {
+	    CEPK *cepk;
+	    int type = CERadialPk(&cepk, ie,
+				  cecache.az[ic][iz].k0,
+				  cecache.az[ic][iz].k1,
+				  cecache.az[ic][iz].k, 1);
+	  }
+	}
+      }
+    }
+
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(ic, iz, jz, skip)
+    {
+      for (ic = 0; ic < cecache.nc; ic++) {
+	skip = SkipMPI();
+	if (skip) continue;
+	for (iz = 0; iz < cecache.nz[ic]; iz++) {
+	  for (jz = iz; jz < cecache.nz[ic]; jz++) {
+	    if (msub) {
+	      double *rqe = CERadialQkMSubTable(cecache.az[ic][iz].k0,
+						cecache.az[ic][iz].k1,
+						cecache.az[ic][jz].k0,
+						cecache.az[ic][jz].k1,
+						cecache.az[ic][iz].k,
+						cecache.az[ic][jz].k, 1);
+	    } else {
+	      if (cecache.az[ic][iz].k != cecache.az[ic][jz].k) continue;
+	      skip = SkipMPI();
+	      if (skip) continue;
+	      double *rqe = CERadialQkTable(cecache.az[ic][iz].k0,
+					    cecache.az[ic][iz].k1,
+					    cecache.az[ic][jz].k0,
+					    cecache.az[ic][jz].k1,
+					    cecache.az[ic][iz].k, 1);
+	    }
+	  }
+	}
+      }
+    }    
+    */
+  }
+
+  ResetWidMPI();
+#pragma omp parallel default(shared) private(ic, ilow, iup, skip, ie)
+  {
+    int nsub, m, k, ip, iempty;
+    double bethe[3];
+    double params[MAXMSUB*NPARAMS];
+    double qkc[MAXMSUB*MAXNUSR];
+    double e;
+    CE_RECORD r;
+    nsub = 1;
+    if (msub) {
+      r.params = (float *) malloc(sizeof(float)*nsub);
+    } else if (qk_mode == QK_FIT) {
+      m = nparams * nsub;
+      r.params = (float *) malloc(sizeof(float)*m);
+    }
+    m = n_usr * nsub;
+    r.strength = (float *) malloc(sizeof(float)*m);
+    for (ic = 0; ic < cecache.nc; ic++) {
+      skip = SkipMPI();
+      if (skip) continue;
+      ilow = cecache.low[ic];
+      iup = cecache.up[ic];
+      if (iuta) {
+	k = CollisionStrengthUTA(qkc, params, &e, bethe, ilow, iup);
+      } else {
+	k = CollisionStrength(qkc, params, &e, bethe, ilow, iup, msub);
+      }
+      if (k < 0) continue;
+      r.bethe = bethe[0];
+      r.born[0] = bethe[1];
+      r.born[1] = bethe[2];
+      r.lower = ilow;
+      r.upper = iup;
+      r.nsub = k;
+      if (r.nsub > nsub) {
+	r.params = (float *) realloc(r.params, sizeof(float)*r.nsub);
+	m = n_usr * r.nsub;
+	r.strength = (float *) realloc(r.strength, sizeof(float)*m);
+	nsub = r.nsub;
+      }      
+      if (msub) {
+	for (m = 0; m < r.nsub; m++) {
+	  r.params[m] = (float) params[m];
+	}
+      } else if (qk_mode == QK_FIT) {
+	ip = 0;
+	for (m = 0; m < r.nsub; m++) {
+	  for (ie = 0; ie < nparams; ie++) {
+	    r.params[ip] = (float) params[ip];
+	    ip++;
+	  }
+	}
+      }
+      
+      ip = 0;
+      iempty = 1;
+      for (m = 0; m < r.nsub; m++) {
+	for (ie = 0; ie < n_usr; ie++) {
+	  r.strength[ip] = (float) qkc[ip];
+	  if (r.strength[ip]) iempty = 0;
+	  ip++;
+	}
+      }
+      if (iempty == 0) {
+	WriteCERecord(f, &r);
+      }
+    }
+    if (msub || qk_mode == QK_FIT) free(r.params);
+    free(r.strength);
+  }
+}
+
 int SaveExcitation(int nlow, int *low, int nup, int *up, int msub, char *fn) {
 #ifdef PERFORM_STATISTICS
   STRUCT_TIMING structt;
@@ -2434,19 +2961,18 @@ int SaveExcitation(int nlow, int *low, int nup, int *up, int msub, char *fn) {
   SYMMETRY *sym;
   STATE *st;
   CONFIG *cfg;
-  int i, j, k, n, m, ie, ip;
-  FILE *f;
+  int i, j, k, n, m, ie, ip, iempty, nsub;
+  TFILE *f;
   double qkc[MAXMSUB*MAXNUSR];
   double params[MAXMSUB*NPARAMS];
   int *alev;
-  int nsub;
   LEVEL *lev1, *lev2;
   CE_RECORD r;
   CE_HEADER ce_hdr;
   F_HEADER fhdr;
   ARRAY subte;
   int isub, n_tegrid0, n_egrid0, n_usr0;
-  int te_set, e_set, usr_set, iempty, iuta;
+  int te_set, e_set, usr_set, iuta;
   double emin, emax, e, c;
   double e0, e1, te0, ei;
   double rmin, rmax, bethe[3];
@@ -2497,6 +3023,12 @@ int SaveExcitation(int nlow, int *low, int nup, int *up, int msub, char *fn) {
     return 0;
   }
 
+  /*
+  if (!iuta) {
+    AllocCECache(msub);
+    PrepAngZStates(nlow, low, nup, up);
+  }
+  */
   ei = 1E31;
   if (iuta) {
     for (j = 0; j < nup; j++) {
@@ -2692,8 +3224,10 @@ int SaveExcitation(int nlow, int *low, int nup, int *up, int msub, char *fn) {
     ce_hdr.tegrid = tegrid;
     ce_hdr.egrid = egrid;
     ce_hdr.usr_egrid = usr_egrid;
-
-    InitFile(f, &fhdr, &ce_hdr);  
+    InitFile(f, &fhdr, &ce_hdr);
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(i, j, lev1, lev2, e, ilow, iup, k, qkc, params, bethe, r, m, ip, nsub, ie, iempty)
+    {
     nsub = 1;
     if (msub) {
       r.params = (float *) malloc(sizeof(float)*nsub);
@@ -2702,12 +3236,12 @@ int SaveExcitation(int nlow, int *low, int nup, int *up, int msub, char *fn) {
       r.params = (float *) malloc(sizeof(float)*m);
     }
     m = ce_hdr.n_usr * nsub;
-    r.strength = (float *) malloc(sizeof(float)*m);
-    
+    r.strength = (float *) malloc(sizeof(float)*m);    
+    //ic = 0;
     for (i = 0; i < nlow; i++) {
       lev1 = GetLevel(low[i]);
       for (j = 0; j < nup; j++) {
-	lev2 = GetLevel(up[j]);
+	lev2 = GetLevel(up[j]);	
 	e = lev2->energy - lev1->energy;	
 	ilow = low[i];
 	iup = up[j];
@@ -2719,6 +3253,8 @@ int SaveExcitation(int nlow, int *low, int nup, int *up, int msub, char *fn) {
 	  }
 	}	    
 	if (e < e0 || e >= e1) continue;
+	int skip = SkipMPI();
+	if (skip) continue;
 	if (iuta) {
 	  k = CollisionStrengthUTA(qkc, params, &e, bethe, ilow, iup);
 	} else {
@@ -2768,15 +3304,32 @@ int SaveExcitation(int nlow, int *low, int nup, int *up, int msub, char *fn) {
     }
     if (msub || qk_mode == QK_FIT) free(r.params);
     free(r.strength);
+    }
+  /*
+    cecache.low[ic] = ilow;
+    cecache.up[ic] = iup;
+    ic++;
+    if (ic == maxcecache) {
+    cecache.nc = ic;
+    ic = 0;
+    ProcessCECache(msub, iuta, f);
+    }
+    }
+    }
+    if (ic > 0) {
+      cecache.nc = ic;
+      ProcessCECache(msub, iuta, f);
+    }
+  */
     DeinitFile(f, &fhdr);
     e0 = e1;
     FreeExcitationQk();
     ReinitRadial(2);
   }
-
+  
   ReinitExcitation(1);
-
-  ArrayFree(&subte, NULL);
+  //FreeCECache(0);
+  ArrayFreeLock(&subte, NULL);
   if (alev) free(alev);
   CloseFile(f, &fhdr);
 
@@ -2845,7 +3398,7 @@ int SaveExcitationEB(int nlow0, int *low0, int nup0, int *up0, char *fn) {
   double e0, e1, te0, ei;
   double rmin, rmax, bethe[3];
   int nc, ilow, iup;
-  FILE *f;
+  TFILE *f;
   double qkc[MAXNE+1];
  
   if (GetLowUpEB(&nlow, &low, &nup, &up, nlow0, low0, nup0, up0) == -1)
@@ -3017,8 +3570,11 @@ int SaveExcitationEB(int nlow0, int *low0, int nup0, int *up0, char *fn) {
     GetFields(&ce_hdr.bfield, &ce_hdr.efield, &ce_hdr.fangle);
     InitFile(f, &fhdr, &ce_hdr);  
     m = ce_hdr.n_egrid;
-    r.strength = (float *) malloc(sizeof(float)*m);
-    
+
+    ResetWidMPI();
+#pragma omp parallel default(shared) private(i, j, r, lev1, lev2, e, ilow, iup, k, iempty, ie, qkc, bethe)
+    {
+    r.strength = (float *) malloc(sizeof(float)*m);    
     for (i = 0; i < nlow; i++) {
       lev1 = GetEBLevel(low[i]);
       for (j = 0; j < nup; j++) {
@@ -3034,6 +3590,8 @@ int SaveExcitationEB(int nlow0, int *low0, int nup0, int *up0, char *fn) {
 	  }
 	}	    
 	if (e < e0 || e >= e1) continue;
+	int skip = SkipMPI();
+	if (skip) continue;
 	k = CollisionStrengthEB(qkc, &e, bethe, ilow, iup); 
 	if (k < 0) continue;
 
@@ -3054,6 +3612,7 @@ int SaveExcitationEB(int nlow0, int *low0, int nup0, int *up0, char *fn) {
       }
     }
     free(r.strength);
+    }
     DeinitFile(f, &fhdr);
     e0 = e1;
     FreeExcitationQk();
@@ -3062,7 +3621,7 @@ int SaveExcitationEB(int nlow0, int *low0, int nup0, int *up0, char *fn) {
 
   ReinitExcitation(1);
 
-  ArrayFree(&subte, NULL);
+  ArrayFreeLock(&subte, NULL);
   free(low);
   free(up);
 
@@ -3093,7 +3652,7 @@ int SaveExcitationEBD(int nlow0, int *low0, int nup0, int *up0, char *fn) {
   double e0, e1, te0, ei;
   double rmin, rmax;
   int nc, ilow, iup;
-  FILE *f;
+  TFILE *f;
   double *qkc;
   double *bethe, *born;
  
@@ -3360,11 +3919,11 @@ int InitExcitation(void) {
 
   ndim = 3;
   pk_array = (MULTI *) malloc(sizeof(MULTI));
-  MultiInit(pk_array, sizeof(CEPK), ndim, blocks1);
+  MultiInit(pk_array, sizeof(CEPK), ndim, blocks1, "pk_array");
 
   ndim = 5;
   qk_array = (MULTI *) malloc(sizeof(MULTI));
-  MultiInit(qk_array, sizeof(double *), ndim, blocks2);
+  MultiInit(qk_array, sizeof(double *), ndim, blocks2, "qk_array");
 
   if (fpw) {
     fclose(fpw);
@@ -3382,7 +3941,8 @@ int InitExcitation(void) {
 
   SetAngleGrid(0, 10, 0.0, PI);
   SetAngleGrid(1, 20, 0.0, TWO_PI);
-  
+
+  SetMaxCECache(-1);
   return 0;
 }
 

@@ -17,6 +17,7 @@
  */
 
 #include "config.h"
+#include "angular.h"
 
 static char *rcsid="$Id$";
 #if __GNUC__ == 2
@@ -69,6 +70,81 @@ static SYMMETRY *symmetry_list;
 */
 static char spec_symbols[MAX_SPEC_SYMBOLS+2] = "spdfghiklmnoqrtuvwxyz*"; 
 
+#define NJQ 25
+#define NJ2 10
+static int _ja[25] = {1, 3, 3, 5, 5, 5, 7, 7, 7, 7, 9, 9, 9, 9, 9,
+		      11, 11, 13, 13, 15, 15, 17, 17, 19, 19};
+static int _qa[25] = {1, 1, 2, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 4, 5,
+		      1, 2, 1, 2, 1, 2, 1, 2};
+static int _ji[NJ2] = {0, 1, 3, 6, 10, 15, 17, 19, 21, 23};
+static SHELL_STATE *_csf1[NJQ];
+static SHELL_STATE *_csf2[NJQ][NJQ];
+static SHELL_STATE *_csf3[NJQ][NJQ][NJQ];
+static SHELL_STATE *_csf4[NJQ][NJQ][NJQ][NJQ];
+static SHELL_STATE *_csf5[NJQ][NJQ][NJQ][NJQ][NJQ];
+static int _ncsf1[NJQ];
+static int _ncsf2[NJQ][NJQ];
+static int _ncsf3[NJQ][NJQ][NJQ];
+static int _ncsf4[NJQ][NJQ][NJQ][NJQ];
+static int _ncsf5[NJQ][NJQ][NJQ][NJQ][NJQ];
+#define NCS 25
+static int _isclosed[NCS][NCS];
+			  
+#define MAXN1 50
+#define MAXN2 50
+#define MAXNK1 2501
+#define MAXNK2 2501
+#define MAXNK12 (MAXNK1*MAXNK2)
+static ARRAY _csary[MAXNK12];
+
+int IsClosedComplex(int n, int nq) {
+  if (n >= NCS) return 0;
+  if (nq < 2*n*n) return 0;
+  int i;
+  for (i = 0; i < n; i++) {
+    if (!_isclosed[n-1][i]) return 0;
+  }
+  return 1;
+}
+
+int IsClosedShellNR(int n, int k, int nq) {
+  if (n >= NCS) return 0;
+  if (nq < 2*(k*2+1)) return 0;
+  return _isclosed[n-1][k];
+}
+
+int IsClosedShellFR(int n, int k, int j, int nq) {
+  if (n >= NCS) return 0;
+  if (nq < j+1) return 0;
+  return _isclosed[n-1][k];
+}
+
+void SetClosedShellNR(int n, int k) {
+  int i, j;
+  if (n <= 0) {
+    for (i = 0; i < NCS; i++) {
+      for (j = 0; j < NCS; j++) {
+	_isclosed[i][j] = 0;
+      }
+    }
+    return;
+  }
+  if (n >= NCS) return;
+  _isclosed[n-1][k] = 1;
+}
+
+int IndexJQ(int j, int q) {
+  int i, jm, jp;  
+  jp = j+1;
+  if (q == 0 || q >= jp) return -1;
+  if (j > 19) return -2;
+  jm = (j-1)/2;
+  if (q > jp/2) q = jp-q;
+  if (j > 9 && q > 2) return -2;
+  i = _ji[jm] + q-1;
+  return i;
+}
+    
 static void InitConfigData(void *p, int n) {
   CONFIG *d;
   int i;
@@ -82,9 +158,21 @@ static void InitConfigData(void *p, int n) {
     d[i].symstate = NULL;
     d[i].shells = NULL;
     d[i].csfs = NULL;
+    d[i].igroup = -1;
+    d[i].icfg = -1;    
   }
 }
   
+int ShellDegeneracy(int g, int nq) {
+  if (nq == 1) {
+    return g;
+  } else if (nq == g) {
+    return 1;
+  } else {
+    return (int) (exp(LnFactorial(g)-LnFactorial(nq)-LnFactorial(g-nq))+0.5);
+  }
+}
+
 /* 
 ** FUNCTION:    DistributeElectronsShell
 ** PURPOSE:     distribute nq electrons among the specified shells
@@ -574,8 +662,8 @@ int ApplyRestriction(int ncfg, CONFIG *cfg, int nc, SHELL_RESTRICTION *sr) {
 	break;
       }
       if (c == 0) {
-	if (cfg[i].n_shells > 0) {
-	  cfg[i].n_shells = 0;
+	if (cfg[i].n_shells >= 0) {
+	  cfg[i].n_shells = -1;
 	  free(cfg[i].shells);
 	  cfg[i].shells = NULL;
 	}
@@ -586,7 +674,7 @@ int ApplyRestriction(int ncfg, CONFIG *cfg, int nc, SHELL_RESTRICTION *sr) {
   i = 0;
   j = 0;
   while (i < ncfg) {
-    if (cfg[i].n_shells == 0) {
+    if (cfg[i].n_shells < 0) {
       i++;
     } else {
       cfg[j].n_shells = cfg[i].n_shells;
@@ -665,7 +753,6 @@ int DistributeElectrons(CONFIG **cfg, double *nq, char *scfg) {
 
   free(shell);
   free(maxq);
-
   if (nc > 0) {
     ncfg = ApplyRestriction(ncfg, *cfg, nc, sr);
     for (i = 0; i < nc; i++) {
@@ -673,7 +760,6 @@ int DistributeElectrons(CONFIG **cfg, double *nq, char *scfg) {
     }
     free(sr);
   }
-
   return ncfg;
 }
 
@@ -1128,6 +1214,7 @@ int SpecSymbol(char *s, int kl) {
 int Couple(CONFIG *cfg) {
   CONFIG outmost, inner;
   int errcode, i;
+  int *idx = NULL;
 
   if (cfg->n_shells == 0) {
     errcode = -1;
@@ -1140,8 +1227,12 @@ int Couple(CONFIG *cfg) {
   }
 
   /* make sure that the shells are sorted in inverse order */
-  qsort(cfg->shells, cfg->n_shells, sizeof(SHELL), CompareShellInvert);
-
+  for (i = 1; i < cfg->n_shells; i++) {
+    if (CompareShell(&cfg->shells[i-1], &cfg->shells[i]) < 0) {
+      qsort(cfg->shells, cfg->n_shells, sizeof(SHELL), CompareShellInvert);
+      break;
+    }
+  }
   if (IsUTA()) {
     cfg->csfs = NULL;
     cfg->n_csfs = 0;
@@ -1152,6 +1243,78 @@ int Couple(CONFIG *cfg) {
     return 0;
   }
 
+  int ns, j2, nq, id[5], s;
+  idx = malloc(sizeof(int)*cfg->n_shells);
+  ns = 0;
+  for (i = 0; i < cfg->n_shells; i++) {
+    j2 = GetJ(&cfg->shells[i]);
+    nq = GetNq(&cfg->shells[i]);
+    idx[i] = IndexJQ(j2, nq);
+    if (idx[i] == -2) {
+      ns = -1;
+      break;
+    } else if (idx[i] >= 0) {
+      if (ns == 5) {
+	ns = -1;
+	break;
+      }
+      id[ns] = i;
+      ns++;
+    }
+  }
+  SHELL_STATE *csf;
+  int ncsf;
+  switch (ns) {
+  case 1:
+    ncsf = _ncsf1[idx[id[0]]];
+    csf = _csf1[idx[id[0]]];
+    break;
+  case 2:
+    ncsf = _ncsf2[idx[id[0]]][idx[id[1]]];
+    csf = _csf2[idx[id[0]]][idx[id[1]]];
+    break;
+  case 3:
+    ncsf = _ncsf3[idx[id[0]]][idx[id[1]]][idx[id[2]]];
+    csf = _csf3[idx[id[0]]][idx[id[1]]][idx[id[2]]];
+    break;
+  case 4:
+    ncsf = _ncsf4[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]];
+    csf = _csf4[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]];
+    break;
+  case 5:
+    ncsf = _ncsf5[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]][idx[id[4]]];
+    csf = _csf5[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]][idx[id[4]]];
+    break;
+  default:
+    ncsf = 0;
+    csf = NULL;
+  }
+  if (csf != NULL) {
+    cfg->n_csfs = ncsf;
+    cfg->csfs = malloc(sizeof(SHELL_STATE)*cfg->n_shells*cfg->n_csfs);
+    SHELL_STATE *p1 = cfg->csfs + cfg->n_shells*cfg->n_csfs - 1;
+    SHELL_STATE *p0 = csf + ns*ncsf - 1;
+    for (i = 0; i < ncsf; i++) {
+      for (s = cfg->n_shells-1; s >= 0; s--) {
+	if (idx[s] >= 0) {
+	  PackShellState(p1, p0->totalJ, p0->shellJ, p0->nu, p0->Nr);
+	  p0--;
+	} else {
+	  if (s == cfg->n_shells-1) {
+	    PackShellState(p1, 0, 0, 0, 0);
+	  } else {
+	    PackShellState(p1, p1[1].totalJ, 0, 0, 0);
+	  }
+	}
+	p1--;
+      }
+    }
+    cfg->n_electrons = 0;
+    for (i = 0; i < cfg->n_shells; i++) {
+      cfg->n_electrons += cfg->shells[i].nq;
+    }
+    return 0;
+  }
   if (cfg->n_shells == 1) {
     if (GetSingleShell(cfg) < 0) {
       errcode = -3;
@@ -1183,10 +1346,51 @@ int Couple(CONFIG *cfg) {
     free(inner.csfs);
   }
 
+  if (ns > 0) {
+    ncsf = cfg->n_csfs;
+    csf = malloc(sizeof(SHELL_STATE)*ns*ncsf);
+    SHELL_STATE *p1 = cfg->csfs;
+    SHELL_STATE *p0 = csf;
+    for (i = 0; i < ncsf; i++) {
+      for (s = 0; s < cfg->n_shells; s++) {
+	if (idx[s] >= 0) {
+	  PackShellState(p0, p1->totalJ, p1->shellJ, p1->nu, p1->Nr);
+	  p0++;
+	}
+	p1++;
+      }
+    }
+    switch (ns) {
+    case 1:
+      _ncsf1[idx[id[0]]] = ncsf;
+      _csf1[idx[id[0]]] = csf;
+      break;
+    case 2:
+      _ncsf2[idx[id[0]]][idx[id[1]]] = ncsf;
+      _csf2[idx[id[0]]][idx[id[1]]] = csf;
+      break;
+    case 3:
+      _ncsf3[idx[id[0]]][idx[id[1]]][idx[id[2]]] = ncsf;
+      _csf3[idx[id[0]]][idx[id[1]]][idx[id[2]]] = csf;
+      break;
+    case 4:
+      _ncsf4[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]] = ncsf;
+      _csf4[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]] = csf;
+      break;
+    case 5:
+      _ncsf5[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]][idx[id[4]]] = ncsf;
+      _csf5[idx[id[0]]][idx[id[1]]][idx[id[2]]][idx[id[3]]][idx[id[4]]] = csf;
+      break;
+    default:
+      break;
+    }
+  }
+  if (idx) free(idx);
   return 0;
 
  ERROR:
   printf("****Error in Couple****\n");
+  if (idx) free(idx);
   return errcode;
 }
 
@@ -1312,7 +1516,6 @@ int GetSingleShell(CONFIG *cfg) {
     occupation = max_q - occupation;
   }
   if (occupation < 0) goto ERROR;
-
   switch(occupation) {
   case 0: /** 0 occupation or closed shell **/
     cfg->n_csfs = 1;
@@ -1465,7 +1668,7 @@ int GetSingleShell(CONFIG *cfg) {
     goto ERROR;
 
   }
-
+  
   return 0;
   
  ERROR:
@@ -1585,6 +1788,37 @@ void PackShellState(SHELL_STATE *s, int J, int j, int nu, int Nr){
   s->Nr = Nr;
 }
 
+int ShellNeedNuNr(SHELL *s, SHELL_STATE *st) {
+  if (s->nq < 4) return 0;
+  int j = GetJFromKappa(s->kappa);
+  if (j < 7) return 0;
+  if (j == 7) {
+    if (st->shellJ == 4 || st->shellJ == 8) return 1;
+    return 0;
+  } else if (j == 9) {    
+    if (s->nq == 4) {
+      if (st->shellJ == 6 || st->shellJ == 10 ||
+	  st->shellJ == 14 || st->shellJ == 16 || st->shellJ == 18 ||
+	  st->shellJ == 20 || st->shellJ == 24) {
+	return 0;
+      }
+      if (st->shellJ == 8 || st->shellJ == 12) return 3;
+      return 1;
+    }
+    if (s->nq == 5) {
+      if (st->shellJ == 1 ||
+	  st->shellJ == 3 ||
+	  st->shellJ == 19 ||
+	  st->shellJ == 21 ||
+	  st->shellJ == 25) {
+	return 0;
+      }
+      return 1;
+    }
+  }
+  return 0;
+}
+  
 /* 
 ** FUNCTION:    GroupIndex
 ** PURPOSE:     find the index of the group by its name.
@@ -1644,6 +1878,7 @@ int AddGroup(char *name) {
     exit(1);
   }
   strncpy(cfg_groups[n_groups].name, name, GROUP_NAME_LEN);
+  cfg_groups[n_groups].nmax = 0;
   n_groups++;
   return n_groups-1;
 }
@@ -1718,6 +1953,80 @@ CONFIG *GetConfigFromGroup(int kg, int kc) {
   return (CONFIG *) ArrayGet(&(cfg_groups[kg].cfg_list), kc);
 }
 
+int ConfigToIList(CONFIG *c, int n, int *s) {
+  int i, j;
+  for (i = 0; i < n; i++) s[i] = 0;
+  for (i = 0; i < c->n_shells; i++) {
+    j = ShellToInt(c->shells[i].n, c->shells[i].kappa);
+    if (j >= n) {
+      printf("ConfigToIList error: %d %d\n", j, n);
+      return -1;
+    }
+    s[j] = c->shells[i].nq;
+  }
+  return 0;
+}
+
+CONFIG *ConfigFromIList(int n, int *s) {
+  CONFIG *c;
+  int i, j;
+  c = malloc(sizeof(CONFIG));
+  InitConfigData(c, 1);
+  for (i = 0; i < n; i++) {
+    if (s[i]) c->n_shells++;
+  }
+  c->shells = malloc(sizeof(SHELL)*c->n_shells);
+  j = 0;
+  for (i = n-1; i >= 0; i--) {
+    if (s[i]) {
+      IntToShell(i, &c->shells[j].n, &c->shells[j].kappa);
+      c->shells[j].nq = s[i];
+      j++;      
+    }
+  }
+  return c;
+}
+
+int ConfigExists(CONFIG *cfg) {
+  int i, j, t, n, nele;
+  CONFIG *c;
+  int i0, i1, n1;
+
+  n = cfg->shells[0].n;
+  if (n > MAXN1) {
+    i0 = MAXNK1-1;
+  } else {
+    i0 = ShellToInt(cfg->shells[0].n, cfg->shells[0].kappa);
+  }
+  if (cfg->shells[0].nq > 1) {
+    i1 = i0;
+  } else if (cfg->n_shells > 1 && cfg->shells[1].n <= MAXN2) {
+    i1 = ShellToInt(cfg->shells[1].n, cfg->shells[1].kappa);
+  } else {
+    i1 = MAXNK2-1;
+  }
+  n1 = i0*MAXNK2 + i1;
+  ARRAY *csa = &_csary[n1];
+  if (csa->dim == 0) return 0;
+  nele = 0;
+  for (i = 0; i < cfg->n_shells; i++) {
+    nele += cfg->shells[i].nq;
+  }
+  for (i = 0; i < csa->dim; i++) {
+    CONFIG **p = ArrayGet(csa, i);
+    c = *p;
+    if (nele != c->n_electrons) continue;
+    if (cfg->n_shells != c->n_shells) continue;
+    for (t = 0; t < c->n_shells; t++) {
+      if (cfg->shells[t].n != c->shells[t].n) break;
+      if (cfg->shells[t].kappa != c->shells[t].kappa) break;
+      if (cfg->shells[t].nq != c->shells[t].nq) break;
+    }
+    if (t == c->n_shells) return 1;
+  }
+  return 0;
+}
+
 /* 
 ** FUNCTION:    AddConfigToList
 ** PURPOSE:     add a configuration to the specified group,
@@ -1735,7 +2044,6 @@ CONFIG *GetConfigFromGroup(int kg, int kc) {
 int AddConfigToList(int k, CONFIG *cfg) {
   ARRAY *clist;  
   int n0, kl0, nq0, m, i, n, kl, j, nq;
-
   if (k < 0 || k >= n_groups) return -1;
   if (cfg_groups[k].n_cfgs == 0) {
     cfg_groups[k].n_electrons = cfg->n_electrons;
@@ -1754,8 +2062,11 @@ int AddConfigToList(int k, CONFIG *cfg) {
   nq0 = 0;
   m = 0;
   cfg->nrs = malloc(sizeof(int)*cfg->n_shells);
+  cfg->sweight = 1.0;
+
   for (i = 0; i < cfg->n_shells; i++) {
     UnpackShell(cfg->shells+i, &n, &kl, &j, &nq);
+    cfg->sweight *= ShellDegeneracy(j+1, nq);
     if (n == n0 && kl == kl0) {
       nq0 += nq;
     } else {
@@ -1772,7 +2083,7 @@ int AddConfigToList(int k, CONFIG *cfg) {
     PackNRShell(cfg->nrs+m, n0, kl0, nq0);
     m++;
   }
-
+  
   cfg->nnrs = m;
   if (m < cfg->n_shells) {
     cfg->nrs = ReallocNew(cfg->nrs, sizeof(int)*m);
@@ -1780,12 +2091,35 @@ int AddConfigToList(int k, CONFIG *cfg) {
   if (cfg->n_csfs > 0) {
     cfg->symstate = malloc(sizeof(int)*cfg->n_csfs);
   }
-  if (ArrayAppend(clist, cfg, InitConfigData) == NULL) return -1;
+  cfg->igroup = k;
+  cfg->icfg = cfg_groups[k].n_cfgs;
+  CONFIG *acfg = ArrayAppend(clist, cfg, InitConfigData);
+  if (acfg == NULL) return -1;
   if (cfg->n_csfs > 0) {    
     AddConfigToSymmetry(k, cfg_groups[k].n_cfgs, cfg); 
   }
   cfg_groups[k].n_cfgs++;
-
+  if (cfg->shells[0].n > cfg_groups[k].nmax) {
+    cfg_groups[k].nmax = cfg->shells[0].n;
+  }
+  int i0, i1, n1;
+  n = acfg->shells[0].n;
+  if (n > MAXN1) {
+    i0 = MAXNK1-1;
+  } else {
+    i0 = ShellToInt(acfg->shells[0].n, acfg->shells[0].kappa);
+  }
+  if (acfg->shells[0].nq > 1) {
+    i1 = i0;
+  } else if (acfg->n_shells > 1 && acfg->shells[1].n <= MAXN2) {
+    i1 = ShellToInt(acfg->shells[1].n, acfg->shells[1].kappa);
+  } else {
+    i1 = MAXNK2-1;
+  }
+  n1 = i0*MAXNK2 + i1;
+  ARRAY *csa = &_csary[n1];
+  ArrayAppend(csa, &acfg, InitPointerData);
+  
   return 0;
 }
 
@@ -1811,6 +2145,8 @@ int AddStateToSymmetry(int kg, int kc, int kstate, int parity, int j) {
   k = IsEven(parity)? 2*j : (2*j+1);
   if (k >= MAX_SYMMETRIES) {
     printf("Maximum symmetry reached: %d %d\n", MAX_SYMMETRIES, k);
+    int *ix = NULL;
+    *ix=0;
     exit(1);
   }
 
@@ -1874,6 +2210,8 @@ int AddConfigToSymmetry(int kg, int kc, CONFIG *cfg) {
     k = IsEven(parity)? 2*j : (2*j+1);
     if (k >= MAX_SYMMETRIES) {
       printf("Maximum symmetry reached: %d %d\n", MAX_SYMMETRIES, k);
+      int *ix = NULL;
+      *ix=0;
       exit(1);
     }
     s.kgroup = kg;
@@ -1981,12 +2319,66 @@ void ListConfig(char *fn, int n, int *kg) {
     for (j = 0; j < g->n_cfgs; j++) {
       c = GetConfigFromGroup(kg[i], j);
       ConstructConfigName(a, 2048, c);
-      fprintf(f, "%10s %6d   %s\n", g->name, m, a);
+      fprintf(f, "%32s %6d %6d %6d   %s\n",
+	      g->name, kg[i], j, m, a);
       m++;
     }
   }
   
   if (f != stdout) fclose(f);
+}
+
+int ReadConfig(char *fn, char *c) {
+  FILE *f;
+  char buf[1024];
+  char cbuf[1024];
+  CONFIG *cfg;
+  int t, j, ncfg;
+  
+  if (fn == NULL) return -1;
+  f = fopen(fn, "r");
+  if (f == NULL) {
+    printf("cannot open file %s\n", fn);
+    return -1;
+  }
+  while (1) {
+    char *p = fgets(buf, 1024, f);
+    if (p == NULL) break;
+    p[32] = '\0';
+    char *s = p;
+    while(s && *s == ' ') s++;
+    if (s) {
+      if (c != NULL && strcmp(c, s)) continue;
+      int t = GroupIndex(s);
+      if (t < 0) return -1;
+      char *c = &p[56];
+      int i = 0;      
+      while (c) {
+	if (*c == '\n') {
+	  break;
+	}
+	cbuf[i++] = *c;
+	if (c[1] && c[2] && isalpha(c[1]) && (c[2] == '+' || c[2] == '-')) {
+	  cbuf[i++] = '[';
+	  cbuf[i++] = c[1];
+	  cbuf[i++] = c[2];
+	  cbuf[i++] = ']';
+	  c += 2;
+	}
+	c++;
+      }
+      cbuf[i] = '\0';
+      
+      ncfg = GetConfigFromString(&cfg, cbuf);
+      for (j = 0; j < ncfg; j++) {
+	if (Couple(cfg+j) < 0) return -1;
+	if (AddConfigToList(t, cfg+j) < 0) return -1;
+      }
+      if (ncfg > 0) free(cfg);
+    }
+  }
+  fclose(f);
+  return 0;
 }
 
 /* 
@@ -2023,7 +2415,7 @@ void ListConfig(char *fn, int n, int *kg) {
 **              with M = 2500, the limit is about 70, which should be 
 **              more than enough.
 */
-int GetAverageConfig(int ng, int *kg, double *weight,
+int GetAverageConfig(int ng, int *kg, int ic, double *weight,
 		     int n_screen, int *screened_n, double screened_charge,
 		     int screened_kl, AVERAGE_CONFIG *acfg) {
 #define M 2500 /* max # of shells may be present in an average config */
@@ -2060,8 +2452,13 @@ int GetAverageConfig(int ng, int *kg, double *weight,
 
   for (i = 0; i < ng; i++) {
     c = &(cfg_groups[kg[i]].cfg_list);
-    a = 1.0/cfg_groups[kg[i]].n_cfgs;
+    if (ic < 0) {
+      a = 1.0/cfg_groups[kg[i]].n_cfgs;
+    } else {
+      a = 1.0;
+    }
     for (t = 0; t < cfg_groups[kg[i]].n_cfgs; t++) {
+      if (ic >= 0 && t != ic) continue;
       cfg = (CONFIG *) ArrayGet(c, t);
       for (j = 0; j < cfg->n_shells; j++) {
 	n = cfg->shells[j].n;
@@ -2157,47 +2554,6 @@ int GetAverageConfig(int ng, int *kg, double *weight,
 #undef M
 }
 
-int Bisect(void *p0, int n, int m, void *p,
-	   int (*comp)(const void *, const void *)) {
-  int i, i0, i1, k;
-
-  if (n == 0) return -1;
-  i0 = 0;
-  i1 = n-1;
-  while (i1-i0 > 1) {
-    i = (i0+i1)/2;
-    k = comp(p0, p+m*i);
-    if (k == 0) return i;
-    else if (k < 0) i1 = i;
-    else i0 = i;
-  }
-  
-  k = comp(p0, p);
-  if (k == 0) return i0;
-  k = comp(p0, p+(n-1)*m);
-  if (k == 0) return i1;
-  
-  return -1;
-}
-  
-int IBisect(int b, int n, int *a) {
-  int i, i0, i1;
-
-  if (n == 0) return -1;
-  i0 = 0;
-  i1 = n - 1;
-  while (i1 - i0 > 1) {
-    i = (i0 + i1)/2;
-    if (b == a[i]) return i;
-    else if (b < a[i]) i1 = i;
-    else i0 = i;
-  }
-  
-  if (b == a[i0]) return i0;
-  else if (b == a[i1]) return i1;
-  else return -1;
-}
-
 /* 
 ** FUNCTION:    InGroups
 ** PURPOSE:     determing if a group is within a list of groups.
@@ -2287,7 +2643,32 @@ int InitConfig(void) {
     symmetry_list[i].n_states = 0;
     ArrayInit(&(symmetry_list[i].states), sizeof(STATE), STATES_BLOCK);
   }
-  
+  int i1, i2, i3, i4;
+  for (i = 0; i < NJQ; i++) {
+    _csf1[i] = NULL;
+    _ncsf1[i] = 0;
+    for (i1 = 0; i1 < NJQ; i1++) {
+      _csf2[i][i1] = NULL;
+      _ncsf2[i][i1] = 0;
+      for (i2 = 0; i2 < NJQ; i2++) {
+	_csf3[i][i1][i2] = NULL;
+	_ncsf3[i][i1][i2] = 0;
+	for (i3 = 0; i3 < NJQ; i3++) {
+	  _csf4[i][i1][i2][i3] = NULL;
+	  _ncsf4[i][i1][i2][i3] = 0;
+	  for (i4 = 0; i4 < NJQ; i4++) {
+	    _csf5[i][i1][i2][i3][i4] = NULL;
+	    _ncsf5[i][i1][i2][i3][i4] = 0;
+	  }
+	}
+      }
+    }
+  }
+  for (i = 0; i < MAXNK12; i++) {
+    ArrayInit(&_csary[i], sizeof(CONFIG *), CONFIGS_BLOCK);
+  }
+
+  SetClosedShellNR(0, 0);
   return 0; 
 }
 
@@ -2376,6 +2757,10 @@ int ReinitConfig(int m) {
       symmetry_list[i].n_states = 0;
     }
   }
+  for (i = 0; i < MAXNK12; i++) {
+    ArrayFree(&_csary[i], NULL);
+  }
 
+  SetClosedShellNR(0, 0);
   return 0;
 }

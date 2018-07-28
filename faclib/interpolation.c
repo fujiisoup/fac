@@ -431,7 +431,7 @@ double Simpson(double *x, int i0, int i1) {
 /* integration by newton-cotes formula */
 int NewtonCotes(double *r, double *x, int i0, int i1, int m, int id) {
   int i, k;
-  double a;
+  double a, yp;
 
   if (id >= 0) {
     if (m >= 0) {
@@ -457,13 +457,17 @@ int NewtonCotes(double *r, double *x, int i0, int i1, int m, int id) {
       }
       r[i1] += r[i0];
     } else {
-      for (i = i0+2; i <= i1; i += 2) {
-	r[i] = r[i-2] + _CNC[2][0]*(x[i-2]+x[i]) + _CNC[2][1]*x[i-1];
-	r[i-1] = r[i-2] + 0.5*(x[i-2] + x[i-1]);
+      i = i0+1;      
+      if (x[i0] > 0 && x[i] > 0) {
+	yp = exp(0.5*(log(x[i0])+log(x[i])));
+      } else if (x[i0] < 0 && x[i] < 0) {
+	yp = -exp(0.5*(log(-x[i0])+log(-x[i])));
+      } else {
+	yp = 0.5*(x[i0]+x[i]);
       }
-      if (i == i1+1) {
-	k = i1-1;
-	r[i1] = r[k] + 0.5*(x[k]+x[i1]);
+      r[i0+1] = r[i0] + 0.5*(_CNC[2][0]*(x[i0]+x[i0+1]) + _CNC[2][1]*yp);
+      for (i = i0+2; i <= i1; i++) {
+	r[i] = r[i-2] + _CNC[2][0]*(x[i-2]+x[i]) + _CNC[2][1]*x[i-1];
       }
     }
   } else {
@@ -490,13 +494,17 @@ int NewtonCotes(double *r, double *x, int i0, int i1, int m, int id) {
       }
       r[i1] += r[i0];
     } else {
-      for (i = i1-2; i >= i0; i -= 2) {
-	r[i] = r[i+2] + _CNC[2][0]*(x[i+2]+x[i]) + _CNC[2][1]*x[i+1];
-	r[i+1] = r[i+2] + 0.5*(x[i+2] + x[i+1]);
+      i = i1-1;
+      if (x[i1] > 0 && x[i] > 0) {
+	yp = exp(0.5*(log(x[i1])+log(x[i])));
+      } else if (x[i1] < 0 && x[i] < 0) {
+	yp = -exp(0.5*(log(-x[i1])+log(-x[i])));
+      } else {
+	yp = 0.5*(x[i1]+x[i]);
       }
-      if (i == i0-1) {
-	k = i0+1;
-	r[i0] = r[k] + 0.5*(x[k]+x[i0]);
+      r[i1-1] = r[i1] + 0.5*(_CNC[2][0]*(x[i1]+x[i1-1]) + _CNC[2][1]*yp);
+      for (i = i1-2; i >= i0; i--) {
+	r[i] = r[i+2] + _CNC[2][0]*(x[i+2]+x[i]) + _CNC[2][1]*x[i+1];
       }
     }
   }
@@ -789,7 +797,8 @@ double InterpolateCECross(double e, CE_RECORD *r, CE_HEADER *h,
 int CEMFCross(char *ifn, char *ofn, int i0, int i1, 
 	      int negy, double *egy, int mp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CEF_HEADER h;
   CEF_RECORD r;
@@ -802,18 +811,18 @@ int CEMFCross(char *ifn, char *ofn, int i0, int i1,
   EN_SRECORD *mem_en_table;
   int mem_en_table_size;
 
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp); 
+  if (f1 == NULL) {
+    printf("File %s is not in FAC binary format\n", ifn);
+    return -1;
+  }  
+
   f2 = NULL;
   mem_en_table = GetMemENFTable(&mem_en_table_size);
   if (mem_en_table == NULL) {
     printf("Energy table has not been built in memory.\n");
     return -1;
   }
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
-  }  
   if (strcmp(ofn, "-") == 0) {
     f2 = stdout;
   } else {
@@ -920,7 +929,7 @@ int CEMFCross(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2) {
     if (f2 != stdout) {
@@ -935,7 +944,8 @@ int CEMFCross(char *ifn, char *ofn, int i0, int i1,
 int CEFCross(char *ifn, char *ofn, int i0, int i1, 
 	     int negy, double *egy, int mp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CEF_HEADER h;
   CEF_RECORD r;
@@ -946,18 +956,13 @@ int CEFCross(char *ifn, char *ofn, int i0, int i1,
   EN_SRECORD *mem_en_table;
   int mem_en_table_size;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
   }
 
   f2 = NULL;
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
-  }  
 
   if (fh.type != DB_CEF || fh.nblocks == 0) {
     printf("File %s is not of DB_CE type\n", ifn);
@@ -1061,7 +1066,7 @@ int CEFCross(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2) {
     if (f2 != stdout) {
@@ -1076,7 +1081,8 @@ int CEFCross(char *ifn, char *ofn, int i0, int i1,
 int CECross(char *ifn, char *ofn, int i0, int i1, 
 	    int negy, double *egy, int mp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CE_HEADER h;
   CE_RECORD r;
@@ -1087,18 +1093,13 @@ int CECross(char *ifn, char *ofn, int i0, int i1,
   EN_SRECORD *mem_en_table;
   int mem_en_table_size;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
   }
   
   f2 = NULL;
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
-  }  
 
   if (fh.type != DB_CE || fh.nblocks == 0) {
     printf("File %s is not of DB_CE type\n", ifn);
@@ -1209,7 +1210,7 @@ int CECross(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2) {
     if (f2 != stdout) {
@@ -1224,7 +1225,8 @@ int CECross(char *ifn, char *ofn, int i0, int i1,
 int CEMFMaxwell(char *ifn, char *ofn, int i0, int i1, 
 		int nt, double *temp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CEF_HEADER h;
   CEF_RECORD r;
@@ -1237,7 +1239,11 @@ int CEMFMaxwell(char *ifn, char *ofn, int i0, int i1,
   EN_SRECORD *mem_en_table;
   int mem_en_table_size;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
+  if (f1 == NULL) {
+    printf("cannot open file %s\n", ifn);
+    return -1;
+  }
   f2 = NULL;
   mem_en_table = GetMemENFTable(&mem_en_table_size);
   if (mem_en_table == NULL) {
@@ -1245,11 +1251,6 @@ int CEMFMaxwell(char *ifn, char *ofn, int i0, int i1,
     return -1;
   }
 
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
-  }  
   if (strcmp(ofn, "-") == 0) {
     f2 = stdout;
   } else {
@@ -1317,7 +1318,7 @@ int CEMFMaxwell(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2) {
     if (f2 != stdout) {
@@ -1333,7 +1334,8 @@ int CEMFMaxwell(char *ifn, char *ofn, int i0, int i1,
 int CEFMaxwell(char *ifn, char *ofn, int i0, int i1, 
 	       int nt, double *temp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CEF_HEADER h;
   CEF_RECORD r;
@@ -1344,18 +1346,13 @@ int CEFMaxwell(char *ifn, char *ofn, int i0, int i1,
   EN_SRECORD *mem_en_table;
   int mem_en_table_size;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
   }
    
   f2 = NULL;
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
-  }
 
   if (fh.type != DB_CEF || fh.nblocks == 0) {
     printf("File %s is not of DB_CE type\n", ifn);
@@ -1420,7 +1417,7 @@ int CEFMaxwell(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2) {
     if (f2 != stdout) {
@@ -1436,7 +1433,8 @@ int CEFMaxwell(char *ifn, char *ofn, int i0, int i1,
 int CEMaxwell(char *ifn, char *ofn, int i0, int i1, 
 	      int nt, double *temp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CE_HEADER h;
   CE_RECORD r;
@@ -1447,14 +1445,13 @@ int CEMaxwell(char *ifn, char *ofn, int i0, int i1,
   EN_SRECORD *mem_en_table;
   int mem_en_table_size;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
   }
    
   f2 = NULL;
-  n = ReadFHeader(f1, &fh, &swp);
   if (n == 0) {
     printf("File %s is not in FAC binary format\n", ifn);
     goto DONE;
@@ -1530,7 +1527,7 @@ int CEMaxwell(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2) {
     if (f2 != stdout) {
@@ -1586,7 +1583,8 @@ double InterpolateCIMCross(double e1, double eth, CIM_RECORD *r, CIM_HEADER *h,
 int TotalCICross(char *ifn, char *ofn, int ilev, 
 		 int negy, double *egy, int imin, int imax) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CI_HEADER h;
   CI_RECORD r;
@@ -1604,7 +1602,7 @@ int TotalCICross(char *ifn, char *ofn, int ilev,
 
   nb = 0;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -1620,12 +1618,6 @@ int TotalCICross(char *ifn, char *ofn, int ilev,
     return -1;
   }
   
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
-  }
-
   if (fh.type != DB_CI || fh.nblocks == 0) {
     printf("File %s is not of DB_CI type\n", ifn);
     goto DONE;
@@ -1678,7 +1670,7 @@ int TotalCICross(char *ifn, char *ofn, int ilev,
   free(c);  
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2 != stdout) {
     fclose(f2);
@@ -1692,7 +1684,8 @@ int TotalCICross(char *ifn, char *ofn, int ilev,
 int CICross(char *ifn, char *ofn, int i0, int i1,
 	    int negy, double *egy, int mp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CI_HEADER h;
   CI_RECORD r;
@@ -1710,7 +1703,7 @@ int CICross(char *ifn, char *ofn, int i0, int i1,
 
   nb = 0;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -1724,12 +1717,6 @@ int CICross(char *ifn, char *ofn, int i0, int i1,
   if (f2 == NULL) {
     printf("cannot open file %s\n", ofn);
     return -1;
-  }
-  
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
   }
 
   if (fh.type != DB_CI || fh.nblocks == 0) {
@@ -1796,7 +1783,7 @@ int CICross(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2 != stdout) {
     fclose(f2);
@@ -1810,7 +1797,8 @@ int CICross(char *ifn, char *ofn, int i0, int i1,
 int CIMaxwell(char *ifn, char *ofn, int i0, int i1,
 	      int negy, double *egy) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CI_HEADER h;
   CI_RECORD r;
@@ -1830,7 +1818,7 @@ int CIMaxwell(char *ifn, char *ofn, int i0, int i1,
 
   nb = 0;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -1844,12 +1832,6 @@ int CIMaxwell(char *ifn, char *ofn, int i0, int i1,
   if (f2 == NULL) {
     printf("cannot open file %s\n", ofn);
     return -1;
-  }
-  
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
   }
 
   if (fh.type != DB_CI || fh.nblocks == 0) {
@@ -1908,7 +1890,7 @@ int CIMaxwell(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2 != stdout) {
     fclose(f2);
@@ -1922,7 +1904,8 @@ int CIMaxwell(char *ifn, char *ofn, int i0, int i1,
 int CIMCross(char *ifn, char *ofn, int i0, int i1,
 	     int negy, double *egy, int mp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   CIM_HEADER h;
   CIM_RECORD r;
@@ -1940,7 +1923,7 @@ int CIMCross(char *ifn, char *ofn, int i0, int i1,
 
   nb = 0;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -1956,12 +1939,6 @@ int CIMCross(char *ifn, char *ofn, int i0, int i1,
     return -1;
   }
   
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
-  }
-
   if (fh.type != DB_CIM || fh.nblocks == 0) {
     printf("File %s is not of DB_CIM type\n", ifn);
     goto DONE;
@@ -2022,7 +1999,7 @@ int CIMCross(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2 != stdout) {
     fclose(f2);
@@ -2036,7 +2013,8 @@ int CIMCross(char *ifn, char *ofn, int i0, int i1,
 int TotalPICross(char *ifn, char *ofn, int ilev, 
 		 int negy, double *egy, int imin, int imax) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   RR_HEADER h;
   RR_RECORD r;
@@ -2057,7 +2035,7 @@ int TotalPICross(char *ifn, char *ofn, int ilev,
 
   nb = 0;
 
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -2071,12 +2049,6 @@ int TotalPICross(char *ifn, char *ofn, int ilev,
   if (f2 == NULL) {
     printf("cannot open file %s\n", ofn);
     return -1;
-  }
-
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
   }
 
   if (fh.type != DB_RR || fh.nblocks == 0) {
@@ -2155,7 +2127,7 @@ int TotalPICross(char *ifn, char *ofn, int ilev,
   free(c);  
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2 != stdout) {
     fclose(f2);
@@ -2169,7 +2141,8 @@ int TotalPICross(char *ifn, char *ofn, int ilev,
 int RRCross(char *ifn, char *ofn, int i0, int i1,
 	    int negy, double *egy, int mp) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   RR_HEADER h;
   RR_RECORD r;
@@ -2190,7 +2163,7 @@ int RRCross(char *ifn, char *ofn, int i0, int i1,
 
   nb = 0;
 
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -2204,12 +2177,6 @@ int RRCross(char *ifn, char *ofn, int i0, int i1,
   if (f2 == NULL) {
     printf("cannot open file %s\n", ofn);
     return -1;
-  }
-
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
   }
 
   if (fh.type != DB_RR || fh.nblocks == 0) {
@@ -2304,7 +2271,7 @@ int RRCross(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2 != stdout) {
     fclose(f2);
@@ -2318,7 +2285,8 @@ int RRCross(char *ifn, char *ofn, int i0, int i1,
 int RRMaxwell(char *ifn, char *ofn, int i0, int i1,
 	      int negy, double *egy) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   RR_HEADER h;
   RR_RECORD r;
@@ -2341,7 +2309,7 @@ int RRMaxwell(char *ifn, char *ofn, int i0, int i1,
 
   nb = 0;
 
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -2355,12 +2323,6 @@ int RRMaxwell(char *ifn, char *ofn, int i0, int i1,
   if (f2 == NULL) {
     printf("cannot open file %s\n", ofn);
     return -1;
-  }
-
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
   }
 
   if (fh.type != DB_RR || fh.nblocks == 0) {
@@ -2448,7 +2410,7 @@ int RRMaxwell(char *ifn, char *ofn, int i0, int i1,
   }
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
 
   if (f2 != stdout) {
     fclose(f2);
@@ -2476,7 +2438,8 @@ int TotalRRCross(char *ifn, char *ofn, int ilev,
 		 int negy, double *egy, int n0, int n1, int nmax,
 		 int imin, int imax) {
   F_HEADER fh;
-  FILE *f1, *f2;
+  TFILE *f1;
+  FILE *f2;
   int n, swp;
   RR_HEADER h;
   RR_RECORD r;
@@ -2497,7 +2460,7 @@ int TotalRRCross(char *ifn, char *ofn, int ilev,
 
   nb = 0;
 
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
@@ -2511,12 +2474,6 @@ int TotalRRCross(char *ifn, char *ofn, int ilev,
   if (f2 == NULL) {
     printf("cannot open file %s\n", ofn);
     return -1;
-  }
-
-  n = ReadFHeader(f1, &fh, &swp);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    goto DONE;
   }
 
   if (fh.type != DB_RR || fh.nblocks == 0) {
@@ -2609,7 +2566,7 @@ int TotalRRCross(char *ifn, char *ofn, int ilev,
   free(c);
 
  DONE:
-  fclose(f1);
+  FCLOSE(f1);
   if (f2 != stdout) {
     fclose(f2);
   } else {
@@ -2698,21 +2655,15 @@ double voigt(double alpha, double v) {
 int InterpCross(char *ifn, char *ofn, int i0, int i1, 
 		int negy, double *egy, int mp) {  
   F_HEADER fh;
-  FILE *f1;
+  TFILE *f1;
   int n, swp;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
   }
-  
-  n = ReadFHeader(f1, &fh, &swp);
-  fclose(f1);
-  if (n == 0) {
-    printf("File %s is not in FAC binary format\n", ifn);
-    return -1;
-  }
+  FCLOSE(f1);
 
   switch (fh.type) {
   case DB_CE:
@@ -2743,17 +2694,15 @@ int InterpCross(char *ifn, char *ofn, int i0, int i1,
 int MaxwellRate(char *ifn, char *ofn, int i0, int i1, 
 		int negy, double *egy) {  
   F_HEADER fh;
-  FILE *f1;
+  TFILE *f1;
   int n, swp;
   
-  f1 = fopen(ifn, "r");
+  f1 = OpenFileRO(ifn, &fh, &swp);
   if (f1 == NULL) {
     printf("cannot open file %s\n", ifn);
     return -1;
   }
-
-  n = ReadFHeader(f1, &fh, &swp);
-  fclose(f1);
+  FCLOSE(f1);
   if (n == 0) {
     printf("File %s is not in FAC binary format\n", ifn);
     return -1;
@@ -2837,7 +2786,7 @@ int CompareModRecordI1(const void *p1, const void *p2) {
 }
 	
 void ModifyEN(int nc, MOD_RECORD *mr, int nr, MOD_RECORD *pr, 
-	      FILE *f0, FILE *f1, F_HEADER *fh, int swp) {
+	      TFILE *f0, TFILE *f1, F_HEADER *fh, int swp) {
   int n, i, k;
   double e0, e1;
   EN_HEADER h;
@@ -2887,7 +2836,7 @@ void ModifyEN(int nc, MOD_RECORD *mr, int nr, MOD_RECORD *pr,
 }
 
 void ModifyTR(int nc, MOD_RECORD *mr, int nr, MOD_RECORD *pr, 
-	      FILE *f0, FILE *f1, F_HEADER *fh, int swp) {
+	      TFILE *f0, TFILE *f1, F_HEADER *fh, int swp) {
   int n, i, k;
   TR_HEADER h;
   TR_RECORD r, *r0;
@@ -2936,7 +2885,7 @@ void ModifyTR(int nc, MOD_RECORD *mr, int nr, MOD_RECORD *pr,
 }
 
 void ModifyCE(int nc, MOD_RECORD *mr, int nr, MOD_RECORD *pr, 
-	      FILE *f0, FILE *f1, F_HEADER *fh, int swp) {
+	      TFILE *f0, TFILE *f1, F_HEADER *fh, int swp) {
   int n, i, k, j, t, p;
   CE_HEADER h, *h0;
   CE_RECORD r, *r0;  
@@ -3102,18 +3051,13 @@ int ReadENTable(char *fn, int *nh, EN_HEADER **h,
   F_HEADER fh;
   EN_HEADER h0;
   int n, swp, i, j, m;
-  FILE *f;
+  TFILE *f;
 
-  f = fopen(fn, "r");
+  f = OpenFileRO(fn, &fh, &swp);
   if (f == NULL) return -1;
-  n = ReadFHeader(f, &fh, &swp);
-  if (n == 0) {
-    fclose(f);
-    return -1;
-  }
 
   if (fh.type != DB_EN) {
-    fclose(f);
+    FCLOSE(f);
     return -1;
   }
   
@@ -3123,10 +3067,10 @@ int ReadENTable(char *fn, int *nh, EN_HEADER **h,
     n = ReadENHeader(f, &h0, swp);
     if (n == 0) break;
     *nr += h0.nlevels;
-    fseek(f, h0.length, SEEK_CUR);
+    FSEEK(f, h0.length, SEEK_CUR);
   }
   if (*nh == 0 || *nr == 0) {
-    fclose(f);
+    FCLOSE(f);
     return -1;
   }
   *h = malloc(sizeof(EN_HEADER)*(*nh));
@@ -3134,7 +3078,7 @@ int ReadENTable(char *fn, int *nh, EN_HEADER **h,
   if (mr) {
     *mr = malloc(sizeof(MOD_RECORD)*(*nr));
   }
-  fseek(f, 0, SEEK_SET);
+  FSEEK(f, 0, SEEK_SET);
   n = ReadFHeader(f, &fh, &swp);
   i = 0;
   j = 0;
@@ -3160,7 +3104,7 @@ int ReadENTable(char *fn, int *nh, EN_HEADER **h,
     }
   }
 
-  fclose(f);
+  FCLOSE(f);
   return 0;
 }
 	
@@ -3170,18 +3114,13 @@ int ReadTRTable(char *fn, int *nh, TR_HEADER **h,
   TR_HEADER h0;
   TR_EXTRA rx;
   int n, swp, i, j, m;
-  FILE *f;
+  TFILE *f;
   
-  f = fopen(fn, "r");
+  f = OpenFileRO(fn, &fh, &swp);
   if (f == NULL) return -1;
-  n = ReadFHeader(f, &fh, &swp);
-  if (n == 0) {
-    fclose(f);
-    return -1;
-  }
 
   if (fh.type != DB_TR) {
-    fclose(f);
+    FCLOSE(f);
     return -1;
   }
   
@@ -3191,10 +3130,10 @@ int ReadTRTable(char *fn, int *nh, TR_HEADER **h,
     n = ReadTRHeader(f, &h0, swp);
     if (n == 0) break;
     *nr += h0.ntransitions;
-    fseek(f, h0.length, SEEK_CUR);
+    FSEEK(f, h0.length, SEEK_CUR);
   }
   if (*nh == 0 || *nr == 0) {
-    fclose(f);
+    FCLOSE(f);
     return -1;
   }
   *h = malloc(sizeof(TR_HEADER)*(*nh));
@@ -3202,7 +3141,7 @@ int ReadTRTable(char *fn, int *nh, TR_HEADER **h,
   if (mr) {
     *mr = malloc(sizeof(MOD_RECORD)*(*nr));
   }
-  fseek(f, 0, SEEK_SET);
+  FSEEK(f, 0, SEEK_SET);
   n = ReadFHeader(f, &fh, &swp);
   i = 0;
   j = 0;
@@ -3229,7 +3168,7 @@ int ReadTRTable(char *fn, int *nh, TR_HEADER **h,
     }
   }
 
-  fclose(f);
+  FCLOSE(f);
   return 0;
 }
 	
@@ -3238,18 +3177,13 @@ int ReadCETable(char *fn, int *nh, CE_HEADER **h,
   F_HEADER fh;
   CE_HEADER h0;
   int n, swp, i, j, m;
-  FILE *f;
+  TFILE *f;
 
-  f = fopen(fn, "r");
+  f = OpenFileRO(fn, &fh, &swp);
   if (f == NULL) return -1;
-  n = ReadFHeader(f, &fh, &swp);
-  if (n == 0) {
-    fclose(f);
-    return -1;
-  }
 
   if (fh.type != DB_CE) {
-    fclose(f);
+    FCLOSE(f);
     return -1;
   }
   
@@ -3262,10 +3196,10 @@ int ReadCETable(char *fn, int *nh, CE_HEADER **h,
     free(h0.tegrid);
     free(h0.egrid);
     free(h0.usr_egrid);
-    fseek(f, h0.length, SEEK_CUR);
+    FSEEK(f, h0.length, SEEK_CUR);
   }
   if (*nh == 0 || *nr == 0) {
-    fclose(f);
+    FCLOSE(f);
     return -1;
   }
   *h = malloc(sizeof(CE_HEADER)*(*nh));
@@ -3273,7 +3207,7 @@ int ReadCETable(char *fn, int *nh, CE_HEADER **h,
   if (mr) {
     *mr = malloc(sizeof(MOD_RECORD)*(*nr));
   }
-  fseek(f, 0, SEEK_SET);
+  FSEEK(f, 0, SEEK_SET);
   n = ReadFHeader(f, &fh, &swp);
   i = 0;
   j = 0;
@@ -3298,13 +3232,13 @@ int ReadCETable(char *fn, int *nh, CE_HEADER **h,
     }
   }
 
-  fclose(f);
+  FCLOSE(f);
   return 0;
 }
 
 void ModifyTable(char *fn, char *fn0, char *fn1, char *fnm) {
   int nc, swp, n, nr, nh, i;
-  FILE *f0, *f1;
+  TFILE *f0, *f1;
   MOD_RECORD *mr, *mr0;
   F_HEADER fh;  
   EN_HEADER *eh;
@@ -3315,16 +3249,9 @@ void ModifyTable(char *fn, char *fn0, char *fn1, char *fnm) {
   CE_RECORD *cr;
   void *hp, *rp;
   
-  f0 = fopen(fn0, "r");
+  f0 = OpenFileRO(fn0, &fh, &swp);
   if (f0 == NULL) {
     printf("cannot open file %s\n", fn0);
-    return;
-  }
-
-  n = ReadFHeader(f0, &fh, &swp);
-  if (n == 0) {
-    printf("cannot read file %s\n", fn0);
-    fclose(f0);
     return;
   }
   
@@ -3347,7 +3274,7 @@ void ModifyTable(char *fn, char *fn0, char *fn1, char *fnm) {
       break;
     default:
       printf("file %s not of right type %d\n", fnm, fh.type);
-      fclose(f0);
+      FCLOSE(f0);
       return;
       break;
     }
@@ -3360,7 +3287,7 @@ void ModifyTable(char *fn, char *fn0, char *fn1, char *fnm) {
   nc = ReadModRecord(fn, &mr, nr);
   if (nc <= 0) {
     printf("no records in file %s\n", fn);
-    fclose(f0);
+    FCLOSE(f0);
     return;
   }
   
@@ -3404,7 +3331,7 @@ void ModifyTable(char *fn, char *fn0, char *fn1, char *fnm) {
   }
   free(mr);
   CloseFile(f1, &fh);
-  fclose(f0);
+  FCLOSE(f0);
 }
 
 void F77Flush(void) {

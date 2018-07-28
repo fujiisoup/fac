@@ -23,6 +23,9 @@
 #include "structure.h"
 #include "transition.h"
 
+#define CPMEFF 0
+#define CPMTR 0
+
 typedef struct _TR_OPT_{
   int mktr;
   int naw;
@@ -56,32 +59,46 @@ typedef struct _MBPT_HAM_ {
   double a, b, c;
   double *hab1, *hba1;
   double *hab, *hba;
+  double *heff0;
+  int hsize0, *basis;
   MBPT_TR *mtr;
 } MBPT_HAM;
 
 typedef struct _MBPT_EFF_ {
   int n, n2;
-  int hsize, nbasis, *basis;
-  double *h0, *e0, *heff;
+  int hsize, nbasis, *basis, hsize0;
+  IDXARY *idb;
+  double *h0, *e0, *heff, *heff0;
+  int *imbpt;
   /* effective hamilton elements for 1-virtual */
   double **hab1, **hba1;
   /* effective hamilton elements for 2-virtual */
   double **hab, **hba;
 } MBPT_EFF;
 
+typedef struct _CONFIG_PAIR_ {
+  int k0;
+  int k1;
+  int m;
+} CONFIG_PAIR;
+
 void InitMBPT(void);
 int StructureMBPT0(char *fn, double de, double ccut, int n, int *s0, int kmax, 
 		   int n1, int *nm, int n2, int *nmp, int n3, int *n3g,
 		   int n4, int *n4g, char *gn);
-int StructureMBPT1(char *fn, char *fn1, int n, int *s0, int nk, int *nkm, 
-		   int n1, int *nm, int n2, int *nmp, int n0);
+int StructureMBPT1(char *fn, char *fn0, char *fn1,
+		   int n, int *s0, int nk, int *nkm, 
+		   int n1, int *nm, int n2, int *nmp, int n0,
+		   int ncp, int icp, int icpf);
 int StructureReadMBPT(char *fn, char *fn2, int nf, char *fn1[], 
 		      int nkg, int *kg, int nkg0);
 void SetExtraMBPT(int m);
-void SetOptMBPT(int i3rd, int n3, double c);
+void SetExcMBPT(int nd, int ns, char *s);
+void SetOptMBPT(int i3rd, int n3, double c, double d, double e, double f);
+void SetWarnMBPT(double f, double g);
 void SetSymMBPT(int nlev, int *ilev);
 void TransitionMBPT(int mk, int naw);
 void TRTableMBPT(char *fn, int nlow, int *low, int nup, int *up);
 int GetAWGridMBPT(double **awgrid);
-
+void UnpackSymStateMBPT(MBPT_EFF **meff, int ms, int *s, int *m);
 #endif
