@@ -598,17 +598,18 @@ typedef struct _TR_RECORD_ {
 \begin{dbdesc}
 \item[\texttt{int lower}:] The lower level index of the transition.
 \item[\texttt{int upper}:] The upper level index of the transition.
-\item[\texttt{float strength}:] In version 1.0.6 or older, This is the
-  weighted oscillator strength $gf$ of the transition. The weighted radiative
-  transition rate is related to $gf$ as (in atomic units):
+\item[\texttt{float strength}:] In version 1.0.6 or older,
+or multipole is 0 even in the newer version,
+this is the weighted oscillator strength $gf$ of the transition.
+The weighted radiative transition rate is related to $gf$ as (in atomic units):
 \begin{equation}
 gA = 2\alpha^3 \omega^2 gf,
 \end{equation}
 where $\alpha$ is the fine structure constant, and $\omega$ is transition
 energy in Hartree atomic units.
 
-In version 1.0.7 or newer, the stored value depends on the multipole values
-used in \key{TransitionTable}.
+In version 1.0.7 or newer, the stored value depends on
+the multipole values used in \key{TransitionTable}.
 By default (\var{m} = 0), this stores the total oscillator strengths $gf$ for
 all the multipoles.
 If other value is used for \var{m}, this stores the multipole matrix elements
@@ -618,6 +619,8 @@ gf =
 \left(2L+1\right)^{-1}\omega\left(\alpha\omega\right)^{2L-2}\left|M\right|^2,
 \end{equation}
 where $L = |m|$ is the multipole rank.
+\end{equation}
+
 \end{dbdesc}
 
 \subsection{\texttt{TR\_EXTRA}}
@@ -1628,6 +1631,9 @@ Mode	= 1
     30  2      0  0  8.9415E+02  3.203146E-02  3.704097E+11  5.407792E-02
     32  2      0  0  8.9844E+02  2.652003E-01  3.096259E+12 -1.552313E-01
 \end{verbatim}
+Note that the TR rate is not weighted, i.e. it indicates Einstein's A
+coefficient.
+
 
 After version 1.0.8, if the UTA mode is used, the output contains an
 additional column after the transition energy, which is the Gaussian standard
@@ -3353,7 +3359,7 @@ configurations in the optional groups \var{p} are allowed to interact with
 if \var{ip}=1, this interaction is treated approximately in a way that the
 non-diagonal elements within \var{p} are neglected. The energy levels are
 output to the file \var{fn}.
-If you specify \var{hfn}, the Hamiltonian is saved to the file \var{hfn} in the 
+If you specify \var{hfn}, the Hamiltonian is saved to the file \var{hfn} in the
 binary format.
 %
 To read the saved Hamiltonian, use \texttt{rfac.read\_ham}.
